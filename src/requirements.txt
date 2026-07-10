@@ -1,0 +1,12 @@
+langchain>=0.3
+langchain-openai>=0.3
+langgraph>=0.4
+fastapi>=0.115
+uvicorn>=0.34
+httpx>=0.28
+python-dotenv>=1.1
+pydantic>=2.11
+requests>=2.32
+langgraph-cli[inmem]>=0.4
+langchain-text-splitters>=0.3
+numpy>=1.26

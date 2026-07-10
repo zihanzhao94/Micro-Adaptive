@@ -1,0 +1,12 @@
+Gradient Descent:
+Gradient descent is an optimization algorithm used to minimize a loss function. It updates model parameters by moving in the opposite direction of the gradient. The learning rate controls the step size of each update. If the learning rate is too large, training may overshoot the minimum. If it is too small, training may be very slow.
+
+Overfitting:
+Overfitting happens when a model performs very well on training data but poorly on unseen validation or test data. It usually means the model has memorized training examples instead of learning general patterns. Common ways to reduce overfitting include regularization, more training data, early stopping, and simpler models.
+
+Backpropagation:
+Backpropagation is the algorithm used to compute gradients in neural networks. It applies the chain rule from the output layer back toward earlier layers. These gradients are then used by optimization algorithms such as gradient descent to update model parameters.
+
+Loss Function:
+A loss function measures how far the model's prediction is from the correct answer. During training, the model tries to minimize this loss. Different tasks use different loss functions, such as mean squared error for regression and cross-entropy for classification.
+

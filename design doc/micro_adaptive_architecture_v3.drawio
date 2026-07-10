@@ -1,0 +1,102 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.3.6 Chrome/140.0.7339.249 Electron/38.8.0 Safari/537.36" version="29.3.6">
+  <diagram name="Micro-Adaptive Architecture" id="architecture">
+    <mxGraphModel dx="1131" dy="803" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="educator-container" parent="1" style="swimlane;startSize=30;fillColor=#f3f0ff;strokeColor=#6366f1;fontColor=#4338ca;fontStyle=1;fontSize=13;rounded=1;" value="EDUCATOR SIDE" vertex="1">
+          <mxGeometry height="110" width="800" x="40" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="dashboard" parent="educator-container" style="rounded=1;fillColor=#ede9fe;strokeColor=#6366f1;fontColor=#3730a3;fontSize=11;align=center;whiteSpace=wrap;fontStyle=1;" value="Dashboard &#xa;Upload PDF / Excel &#xa;Set course intention" vertex="1">
+          <mxGeometry height="60" width="200" x="300" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="fastapi" parent="1" style="rounded=1;fillColor=#ccfbf1;strokeColor=#14b8a6;fontColor=#0f766e;fontSize=12;align=center;whiteSpace=wrap;fontStyle=1;" value="FastAPI Backend Central hub · routing · auth · webhooks" vertex="1">
+          <mxGeometry height="60" width="280" x="300" y="210" as="geometry" />
+        </mxCell>
+        <mxCell id="e-dash-api" edge="1" parent="1" source="dashboard" style="edgeStyle=orthogonalEdgeStyle;fontSize=10;" target="fastapi" value="REST API">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="llamaindex" parent="1" style="rounded=1;fillColor=#ede9fe;strokeColor=#6366f1;fontColor=#3730a3;fontSize=11;align=center;whiteSpace=wrap;" value="LlamaIndex Parse and chunk files" vertex="1">
+          <mxGeometry height="55" width="160" x="60" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="e-api-llama" edge="1" parent="1" source="fastapi" style="edgeStyle=orthogonalEdgeStyle;fontSize=10;exitX=0;exitY=0.5;entryX=1;entryY=0.5;" target="llamaindex" value="file">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="pgvector" parent="1" style="rounded=1;fillColor=#ede9fe;strokeColor=#6366f1;fontColor=#3730a3;fontSize=11;align=center;whiteSpace=wrap;" value="pgvector Store embeddings" vertex="1">
+          <mxGeometry height="55" width="160" x="60" y="450" as="geometry" />
+        </mxCell>
+        <mxCell id="e-llama-pg" edge="1" parent="1" source="llamaindex" style="edgeStyle=orthogonalEdgeStyle;" target="pgvector">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="postgres" parent="1" style="rounded=1;fillColor=#ccfbf1;strokeColor=#14b8a6;fontColor=#0f766e;fontSize=11;align=center;whiteSpace=wrap;" value="PostgreSQL Intention config · student mastery" vertex="1">
+          <mxGeometry height="55" width="180" x="660" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="e-api-pg" edge="1" parent="1" source="fastapi" style="edgeStyle=orthogonalEdgeStyle;fontSize=10;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="postgres" value="intention">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="agent-container" parent="1" style="swimlane;startSize=30;fillColor=#f0fdfa;strokeColor=#14b8a6;fontColor=#0f766e;fontStyle=1;fontSize=13;rounded=1;" value="MULTI-AGENT ENGINE · LangGraph State Graph" vertex="1">
+          <mxGeometry height="240" width="800" x="40" y="560" as="geometry" />
+        </mxCell>
+        <mxCell id="config-note" parent="agent-container" style="text;fillColor=#ede9fe;strokeColor=#6366f1;fontColor=#4338ca;fontSize=10;align=center;rounded=1;whiteSpace=wrap;" value="All agents loaded from system messages" vertex="1">
+          <mxGeometry height="25" width="780" x="10" y="35" as="geometry" />
+        </mxCell>
+        <mxCell id="profiler" parent="agent-container" style="rounded=1;fillColor=#ede9fe;strokeColor=#6366f1;fontColor=#3730a3;fontSize=11;align=center;whiteSpace=wrap;verticalAlign=top;fontStyle=1;" value="Profiler Agent &#xa;Read student profile Mastery per concept Interests and style Update after session" vertex="1">
+          <mxGeometry height="110" width="220" x="20" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="profiler-tools" parent="agent-container" style="rounded=1;fillColor=#fef3c7;strokeColor=#f59e0b;fontColor=#92400e;fontSize=10;align=center;whiteSpace=wrap;" value="Tools: read/write_db · send_email" vertex="1">
+          <mxGeometry height="30" width="220" x="20" y="188" as="geometry" />
+        </mxCell>
+        <mxCell id="pedagogy" parent="agent-container" style="rounded=1;fillColor=#ccfbf1;strokeColor=#14b8a6;fontColor=#0f766e;fontSize=11;align=center;whiteSpace=wrap;verticalAlign=top;fontStyle=1;" value="Pedagogy Agent &#xa;Judge answer correct / incorrect Quiz · analogy · review Socratic dialogue Spaced repetition" vertex="1">
+          <mxGeometry height="110" width="220" x="290" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="pedagogy-tools" parent="agent-container" style="rounded=1;fillColor=#fef3c7;strokeColor=#f59e0b;fontColor=#92400e;fontSize=10;align=center;whiteSpace=wrap;" value="Tools: send_telegram_msg · read/write_db" vertex="1">
+          <mxGeometry height="30" width="220" x="290" y="188" as="geometry" />
+        </mxCell>
+        <mxCell id="generation" parent="agent-container" style="rounded=1;fillColor=#fff1f2;strokeColor=#f43f5e;fontColor=#be123c;fontSize=11;align=center;whiteSpace=wrap;verticalAlign=top;fontStyle=1;" value="Generation Agent &#xa;Retrieve from pgvector Personalised content Interest-based analogy LLM · GPT-4o" vertex="1">
+          <mxGeometry height="110" width="220" x="560" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="generation-tools" parent="agent-container" style="rounded=1;fillColor=#fef3c7;strokeColor=#f59e0b;fontColor=#92400e;fontSize=10;align=center;whiteSpace=wrap;" value="Tools: search_pgvector · read_excel · send_telegram_msg" vertex="1">
+          <mxGeometry height="30" width="220" x="560" y="188" as="geometry" />
+        </mxCell>
+        <mxCell id="e-prof-ped" edge="1" parent="agent-container" source="profiler" style="edgeStyle=orthogonalEdgeStyle;" target="pedagogy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-ped-gen" edge="1" parent="agent-container" source="pedagogy" style="edgeStyle=orthogonalEdgeStyle;" target="generation">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-api-agent" edge="1" parent="1" source="fastapi" style="edgeStyle=orthogonalEdgeStyle;fontSize=10;" target="agent-container" value="invoke">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="scheduler" parent="1" style="rounded=1;fillColor=#ccfbf1;strokeColor=#14b8a6;fontColor=#0f766e;fontSize=12;align=center;whiteSpace=wrap;fontStyle=1;" value="Weekly Scheduler &#xa;Auto check-in · push review · trigger quiz" vertex="1">
+          <mxGeometry height="55" width="280" x="300" y="870" as="geometry" />
+        </mxCell>
+        <mxCell id="e-agent-sched" edge="1" parent="1" source="agent-container" style="edgeStyle=orthogonalEdgeStyle;" target="scheduler">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="telegram-container" parent="1" style="swimlane;startSize=30;fillColor=#fff1f2;strokeColor=#f43f5e;fontColor=#be123c;fontStyle=1;fontSize=13;rounded=1;" value="STUDENT SIDE · Telegram Chatbot" vertex="1">
+          <mxGeometry height="110" width="800" x="40" y="990" as="geometry" />
+        </mxCell>
+        <mxCell id="tg1" parent="telegram-container" style="rounded=1;fillColor=#ffe4e6;strokeColor=#f43f5e;fontColor=#be123c;fontSize=11;align=center;whiteSpace=wrap;" value="Daily Quiz Inline buttons · diff per student" vertex="1">
+          <mxGeometry height="55" width="220" x="20" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="tg2" parent="telegram-container" style="rounded=1;fillColor=#ffe4e6;strokeColor=#f43f5e;fontColor=#be123c;fontSize=11;align=center;whiteSpace=wrap;" value="Socratic Dialogue Follow-up questions · bottleneck finder" vertex="1">
+          <mxGeometry height="55" width="220" x="290" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="tg3" parent="telegram-container" style="rounded=1;fillColor=#ffe4e6;strokeColor=#f43f5e;fontColor=#be123c;fontSize=11;align=center;whiteSpace=wrap;" value="Multimodal Input Voice to Whisper · image · code reply" vertex="1">
+          <mxGeometry height="55" width="220" x="560" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="e-sched-tg" edge="1" parent="1" source="scheduler" style="edgeStyle=orthogonalEdgeStyle;" target="telegram-container">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-webhook" edge="1" parent="1" source="telegram-container" style="edgeStyle=orthogonalEdgeStyle;dashed=1;fontSize=10;exitX=1;exitY=0.5;" target="fastapi" value="webhook">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="900" y="1045" />
+              <mxPoint x="900" y="230" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
