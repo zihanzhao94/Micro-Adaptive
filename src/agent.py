@@ -47,6 +47,8 @@ def answer(question: str, student: dict) -> str:
     interests = ", ".join(student.get("interests", [])) or "general topics"
   
     context = course_rag.query_rag(question)
+    if not context.strip():
+        context = "No relevant course materials found for this question."
     messages = [
         SystemMessage(content=System_prompt),
         HumanMessage(content=(

@@ -20,7 +20,10 @@ src/.env
 # LangGraph API cache
 .langgraph_api/
 
+# Vector database cache
+chroma_db/
+src/chroma_db/
+
 # cached file
 past demo/
-
 

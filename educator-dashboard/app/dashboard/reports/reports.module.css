@@ -1,0 +1,121 @@
+.questionHeader {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.questionHeader:hover { background: var(--bg-elevated); }
+
+.questionLeft {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.questionText {
+  font-size: 14px;
+  color: var(--text-primary);
+  font-weight: 500;
+  line-height: 1.5;
+  text-align: left;
+}
+
+.questionRight {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+.correctRateWrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.correctRateCircle {
+  position: relative;
+  width: 52px; height: 52px;
+}
+
+.rateSvg {
+  width: 52px; height: 52px;
+  transform: rotate(-90deg);
+}
+
+.rateText {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.attemptCount {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* Expanded answers */
+.answersWrap {
+  border-top: 1px solid var(--border);
+  padding: 0 20px 16px;
+}
+
+.answersHeader {
+  display: grid;
+  grid-template-columns: 120px 1fr 80px 60px;
+  gap: 12px;
+  padding: 10px 0;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--border);
+}
+
+.answerRow {
+  display: grid;
+  grid-template-columns: 120px 1fr 80px 60px;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+}
+
+.answerRow:last-child { border-bottom: none; }
+
+.answerStudent {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--primary-light);
+  text-decoration: none;
+}
+
+.answerStudent:hover { color: var(--accent-light); }
+
+.answerText {
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.answerTime {
+  font-size: 11px;
+  color: var(--text-muted);
+}

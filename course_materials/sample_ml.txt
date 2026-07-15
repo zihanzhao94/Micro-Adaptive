@@ -10,3 +10,5 @@ Backpropagation is the algorithm used to compute gradients in neural networks. I
 Loss Function:
 A loss function measures how far the model's prediction is from the correct answer. During training, the model tries to minimize this loss. Different tasks use different loss functions, such as mean squared error for regression and cross-entropy for classification.
 
+Test:
+IT5004's prof is Lek

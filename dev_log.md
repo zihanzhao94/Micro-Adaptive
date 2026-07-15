@@ -163,3 +163,37 @@ bot.py 状态机新增 `IN_SOCRATIC` 状态，学生文字回复时走 `Command(
 - 考虑加入 `/quiz [topic]` 参数，按概念出题
 
 ---
+
+## 2026-07-12 — Course-grounded RAG 初版
+
+### 做了什么
+- 新增 `course_materials/` 目录，开始把课程内容与源代码分离存放
+- 在 `src/course_rag.py` 中实现了课程材料读取、文本切分、向量索引构建、相似度检索和上下文格式化
+- 在 `agent.py` 的自由问答路径中接入 `course_rag.query_rag(question)`，让回答先检索课程材料再交给 LLM 生成
+- 用 `sample_ml.txt` 作为临时材料验证 RAG 基本流程，先跑通单课程问答闭环
+
+### 设计决策
+- **先做最小可运行 RAG，再逐步扩展**
+  - 当前重点是验证 `load → chunk → index → retrieve → answer` 这一条主链路
+  - 暂时不先做多课程管理、上传界面或复杂工具路由，避免 scope 过大
+- **课程材料放在项目根目录**
+  - `src/` 只放代码，`course_materials/` 放课程数据，后续更容易扩展到上传的 PDF、notes 和 slides
+- **通用框架 + 课程扩展**
+  - 核心问答流程保持通用
+  - 课程特有能力（如 diagram review、code review）保留为后续可配置扩展，而不是现在写死
+
+### 遇到的问题 & 解决方法
+- 一开始对 `chunking`、`tokenize`、`vector store` 的职责边界不清楚
+  - 通过先实现最小 RAG，把流程拆成独立函数理解：`load_documents` 负责读取，`chunk_text` 负责切分，`build_index` 负责建索引，`retrieve` 负责检索
+- 课程材料路径容易和 `src/` 混淆
+  - 统一改为项目根目录下的 `course_materials/`
+- 目前 `course_rag.py` 里还有未使用 import 和重复创建 embedding 的问题
+  - 先保证主链路可运行，下一步再做代码收敛和缓存优化
+
+### 下一步
+- 单独测试 `query_rag()`，确认能稳定检索到与问题相关的 chunk
+- 清理 `course_rag.py` 中未使用的 import 和无效变量，避免噪音代码
+- 给检索结果增加空结果 fallback，避免 `agent.answer()` 在无上下文时直接传空字符串
+- 跑通自由问答后，再考虑把 quiz / reflection 的题目生成逐步从 hardcoded 数据迁移到课程材料驱动
+
+---

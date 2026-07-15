@@ -9,4 +9,7 @@ pydantic>=2.11
 requests>=2.32
 langgraph-cli[inmem]>=0.4
 langchain-text-splitters>=0.3
-numpy>=1.26
+langchain-community>=0.3
+chromadb
+pypdf
+python-multipart>=0.0.9

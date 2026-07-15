@@ -1,147 +1,186 @@
+from pathlib import Path
+
+from langchain_community.vectorstores import Chroma
+from langchain_community.document_loaders import PyPDFLoader
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from pathlib import Path
-import numpy as np
+
 
 MATERIALS_DIR = Path(__file__).resolve().parent.parent / "course_materials"
+CHROMA_DIR = Path(__file__).resolve().parent.parent / "chroma_db"
 
 CHUNK_SIZE = 200
 OVERLAP = 40
+TOP_K = 3
+
+index_cache = None
 
 
-def load_documents():
+def load_txt(path: Path) -> str:
     """
-    load all documents from the course_materials directory into directory
-    
-    Args:
-        None
-    Returns:
-        List[Dict]: A list of documents, where each document is a dictionary with keys "source" and "text"
+    Load a plain text course material file.
     """
+    return path.read_text(encoding="utf-8")
+
+
+def load_pdf_documents(path: Path) -> list[dict]:
+    """
+    Load a PDF as page-level documents so retrieved context can cite page numbers.
+    """
+    loader = PyPDFLoader(str(path))
+    pages = loader.load()
     docs = []
 
-    for path in MATERIALS_DIR.glob("*.txt"):
-        text = path.read_text(encoding="utf-8")
+    for page in pages:
         docs.append({
             "source": path.name,
-            "text": text,
+            "type": "pdf",
+            "page": page.metadata.get("page"),
+            "text": page.page_content,
         })
 
     return docs
 
-def chunk_text(docs):
-    """
-    Chunks the text in the documents into smaller chunks.
 
-    Args:
-        docs (List[Dict]): A list of documents, where each document is a dictionary with keys "source" and "text"
-    Returns:
-        List[Dict]: A list of documents, where each document is a dictionary with keys "source", "text" and "chunks" where "chunks" is a list of chunks of the text
+def load_documents() -> list[dict]:
+    """
+    Load all supported course materials into a common document format.
+    """
+    docs = []
+
+    for path in sorted(MATERIALS_DIR.glob("*.txt")):
+        docs.append({
+            "source": path.name,
+            "type": "txt",
+            "page": None,
+            "text": load_txt(path),
+        })
+
+    for path in sorted(MATERIALS_DIR.glob("*.pdf")):
+        docs.extend(load_pdf_documents(path))
+
+    return docs
+
+
+def chunk_text(docs: list[dict]) -> list[dict]:
+    """
+    Split each document into smaller text chunks for embedding.
     """
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=OVERLAP
     )
-    for doc in docs:
-        text = doc["text"]
-        doc["chunks"] = splitter.split_text(text)
-    return docs    
 
-#TODO：always embed docs, consider change to cache or local db
-def build_index(docs):
-    """
-    Builds vector from chunks in docs
-
-    Args:
-        documents (List[Dict]): A list of documents, where each document is a
-    Returns:
-        Dict: A dictionary with keys "chunks" and "embeddings"
-    """
-    
-    embedder = OpenAIEmbeddings()
-    chunk_metas = [] # each chunk contains the source and text
-    chunk_text = [] # each chunk contains the text for conversion to embedding
-    
     for doc in docs:
-        for chunk in doc["chunks"]:
-            chunk_text.append(chunk)
+        doc["chunks"] = splitter.split_text(doc["text"])
+
+    return docs
+
+
+def build_index(docs: list[dict]) -> Chroma:
+    """
+    Build and persist a Chroma vector store from chunked documents.
+    """
+    chunk_texts = []
+    chunk_metas = []
+
+    for doc in docs:
+        for chunk_id, chunk in enumerate(doc["chunks"]):
+            chunk_texts.append(chunk)
             chunk_metas.append({
                 "source": doc["source"],
-                "text": chunk, 
+                "type": doc.get("type"),
+                "page": doc.get("page"),
+                "chunk_id": chunk_id,
             })
-    vectors = embedder.embed_documents(chunk_text)
-    return {"chunks": chunk_metas, "embeddings": vectors}  # make sure chunks[i] and embedding[i] have a one-to-one correspondence
+
+    if not chunk_texts:
+        raise ValueError(f"No course material chunks found in {MATERIALS_DIR}")
+
+    return Chroma.from_texts(
+        texts=chunk_texts,
+        metadatas=chunk_metas,
+        embedding=OpenAIEmbeddings(),
+        persist_directory=str(CHROMA_DIR)
+    )
 
 
-def retrieve(query, index):
+def load_existing_index() -> Chroma:
     """
-    Retrieves relevant documents from the index based on the query.
-
-    Args:
-        query (str): The search query.
-        index (Dict): The index built from the documents.
-
-    Returns:
-        List[Dict]: A list of relevant documents.
+    Load an existing persisted Chroma vector store from disk.
     """
-    embedder = OpenAIEmbeddings()
-    query_embedding = embedder.embed_query(query) #convert query to embedding
-    vector_matrix = np.array(index["embeddings"]) # convert list of list to matrix to make it easier to compute the similarity
-    query_vector = np.array(query_embedding)
+    return Chroma(
+        persist_directory=str(CHROMA_DIR),
+        embedding_function=OpenAIEmbeddings(),
+    )
 
-    #Compute the dot product between the query vector and all chunk vectors
-    scores = np.dot(vector_matrix, query_vector)
-    scores /= np.linalg.norm(vector_matrix, axis=1) * np.linalg.norm(query_vector)
 
-    #Get the top k most similar chunks
-    top_k = 3
-    top_k_indices = np.argsort(scores)[::-1][:top_k]
-    retrieved_docs = [index["chunks"][i] for i in top_k_indices]
-
-    return retrieved_docs
-    
-
-def format_context(retrieved_docs):
+def retrieve(query: str, index: Chroma, top_k: int = TOP_K):
     """
-    Formats the retrieved documents into a context string.
-
-    Args:
-        documents (List[Dict]): A list of relevant documents.
-
-    Returns:
-        str: A formatted context string.
+    Retrieve the most relevant chunks for a query.
     """
+    return index.similarity_search(query, k=top_k)
+
+
+def format_context(retrieved_docs) -> str:
+    """
+    Format retrieved chunks into prompt-ready course context.
+    """
+    if not retrieved_docs:
+        return ""
+
     context_lines = []
-    # loop through the documents and format the source and text to one string
+
     for i, doc in enumerate(retrieved_docs):
-        context_lines.append(f"Context {i+1}\nSource: {doc['source']}\nText:\n{doc['text']}")
+        page = doc.metadata.get("page")
+        page_label = f", page {page + 1}" if isinstance(page, int) else ""
+        context_lines.append(
+            f"Context {i + 1}\n"
+            f"Source: {doc.metadata.get('source')}{page_label}\n"
+            f"Text:\n{doc.page_content}"
+        )
+
     return "\n\n".join(context_lines)
 
-# wrapper to make it easier to use in agent
-index_cache = None
-def get_index():
-    global index_cache # modify global var
-    # if none load file else use global cache
-    if index_cache is None:
-        docs = load_documents()
-        docs = chunk_text(docs)
-        index_cache = build_index(docs)
+
+def get_index() -> Chroma:
+    """
+    Return an in-memory index if available, otherwise load or build one.
+    """
+    global index_cache
+
+    if index_cache is not None:
+        return index_cache
+
+    if CHROMA_DIR.exists():
+        index_cache = load_existing_index()
+        return index_cache
+
+    docs = chunk_text(load_documents())
+    index_cache = build_index(docs)
     return index_cache
 
-def query_rag(query):
+
+def refresh_index() -> Chroma:
+    """
+    Rebuild the in-memory index from current course materials.
+
+    Use this after adding, removing, or editing files in course_materials.
+    """
+    global index_cache
+
+    docs = chunk_text(load_documents())
+    index_cache = build_index(docs)
+    return index_cache
+
+
+def query_rag(query: str) -> str:
     index = get_index()
     retrieved_docs = retrieve(query, index)
     return format_context(retrieved_docs)
-    
-    
-        
-if __name__ == "__main__":
-    docs = load_documents()
-    docs = chunk_text(docs)
-    index = build_index(docs)
-    query = "Who is 5004's prof"
-    retrieve_docs = retrieve(query, index)
-    context = format_context(retrieve_docs)
-    print(context)
 
-    
+
+if __name__ == "__main__":
+    index = refresh_index()
+    query = "What is IT5004's about?"
+    print(format_context(retrieve(query, index)))
