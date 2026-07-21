@@ -42,24 +42,24 @@ def load_pdf_documents(path: Path) -> list[dict]:
     return docs
 
 
-def load_documents() -> list[dict]:
+def load_material_file(path: Path) -> list[dict]:
     """
-    Load all supported course materials into a common document format.
+    Load one uploaded course material into a common document format.
     """
-    docs = []
+    suffix = path.suffix.lower()
 
-    for path in sorted(MATERIALS_DIR.glob("*.txt")):
-        docs.append({
+    if suffix == ".txt":
+        return [{
             "source": path.name,
             "type": "txt",
             "page": None,
             "text": load_txt(path),
-        })
+        }]
 
-    for path in sorted(MATERIALS_DIR.glob("*.pdf")):
-        docs.extend(load_pdf_documents(path))
+    if suffix == ".pdf":
+        return load_pdf_documents(path)
 
-    return docs
+    raise ValueError(f"Unsupported material type: {path.suffix}")
 
 
 def chunk_text(docs: list[dict]) -> list[dict]:
@@ -143,9 +143,60 @@ def format_context(retrieved_docs) -> str:
     return "\n\n".join(context_lines)
 
 
-def get_index() -> Chroma:
+def add_to_index(docs: list[dict]) -> Chroma:
     """
-    Return an in-memory index if available, otherwise load or build one.
+    Add chunked documents to an existing Chroma index, or create one if needed.
+    """
+    global index_cache
+
+    chunk_texts = []
+    chunk_metas = []
+
+    for doc in docs:
+        for chunk_id, chunk in enumerate(doc["chunks"]):
+            chunk_texts.append(chunk)
+            chunk_metas.append({
+                "source": doc["source"],
+                "type": doc.get("type"),
+                "page": doc.get("page"),
+                "chunk_id": chunk_id,
+            })
+
+    if not chunk_texts:
+        raise ValueError("No chunks found in uploaded material.")
+
+    if index_cache is None and CHROMA_DIR.exists():
+        index_cache = load_existing_index()
+
+    if index_cache is None:
+        index_cache = Chroma.from_texts(
+            texts=chunk_texts,
+            metadatas=chunk_metas,
+            embedding=OpenAIEmbeddings(),
+            persist_directory=str(CHROMA_DIR),
+        )
+    else:
+        for source in {doc["source"] for doc in docs}:
+            try:
+                index_cache.delete(where={"source": source})
+            except Exception:
+                pass
+        index_cache.add_texts(texts=chunk_texts, metadatas=chunk_metas)
+
+    return index_cache
+
+
+def index_uploaded_material(path: Path) -> Chroma:
+    """
+    Index exactly one uploaded material file.
+    """
+    docs = chunk_text(load_material_file(path))
+    return add_to_index(docs)
+
+
+def get_index() -> Chroma | None:
+    """
+    Return an in-memory index if available, otherwise load an existing persisted index.
     """
     global index_cache
 
@@ -156,31 +207,26 @@ def get_index() -> Chroma:
         index_cache = load_existing_index()
         return index_cache
 
-    docs = chunk_text(load_documents())
-    index_cache = build_index(docs)
-    return index_cache
+    return None
 
 
 def refresh_index() -> Chroma:
     """
-    Rebuild the in-memory index from current course materials.
+    Full local directory re-indexing is intentionally disabled.
 
-    Use this after adding, removing, or editing files in course_materials.
+    Use index_uploaded_material(path) from the upload API instead.
     """
-    global index_cache
-
-    docs = chunk_text(load_documents())
-    index_cache = build_index(docs)
-    return index_cache
+    raise RuntimeError("Full local re-indexing is disabled. Use index_uploaded_material(path).")
 
 
 def query_rag(query: str) -> str:
     index = get_index()
+    if index is None:
+        return ""
     retrieved_docs = retrieve(query, index)
     return format_context(retrieved_docs)
 
 
 if __name__ == "__main__":
-    index = refresh_index()
     query = "What is IT5004's about?"
-    print(format_context(retrieve(query, index)))
+    print(query_rag(query))

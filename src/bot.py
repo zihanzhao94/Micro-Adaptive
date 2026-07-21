@@ -6,7 +6,7 @@ Compatible with Python 3.10+.
 
 Flows:
   /start    → Onboarding (name, interests, learning style)
-  /quiz     → Send a quiz question with inline buttons
+  /learn    → Start an adaptive learning activity
   /progress → Mastery summary per concept
   /help     → Show commands
   <text>    → AI concept explanation (mock)
@@ -22,15 +22,13 @@ from datetime import datetime
 import requests
 from dotenv import load_dotenv
 
-# import database as db        # SQLite layer (same interface as the old mock_db)
-import mock_db as db  # In-memory mock database (for testing)      
-import quiz_data
+import database as db
 import agent
 from langgraph.types import Command
 
 # ── Config ────────────────────────────────────────────────────────────────────
 load_dotenv()
-# db.init_db()
+db.init_db()
 TOKEN = os.getenv("BOT_TOKEN", "")
 if not TOKEN:
     raise SystemExit("BOT_TOKEN not set in .env")
@@ -51,6 +49,7 @@ STATES = {
     "IDLE":        "idle",
     "WAIT_NAME":   "wait_name",
     "WAIT_STYLE":  "wait_style",
+    "WAIT_ACTIVITY_SUBMISSION": "wait_activity_submission",
     "IN_SOCRATIC": "in_socratic",   # waiting for student's Socratic reply
 }
 
@@ -76,14 +75,18 @@ def api(method: str, **kwargs) -> dict:
 
 
 def send(chat_id: int, text: str, reply_markup=None, parse_mode="Markdown"):
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    payload = {"chat_id": chat_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
     return api("sendMessage", **payload)
 
 
 def edit(chat_id: int, msg_id: int, text: str, reply_markup=None, parse_mode="Markdown"):
-    payload = {"chat_id": chat_id, "message_id": msg_id, "text": text, "parse_mode": parse_mode}
+    payload = {"chat_id": chat_id, "message_id": msg_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
     return api("editMessageText", **payload)
@@ -107,6 +110,14 @@ def inline_kb(rows: list[list[tuple]]) -> dict:
     }
 
 
+def message_content(message) -> str:
+    if hasattr(message, "content"):
+        return message.content
+    if isinstance(message, dict):
+        return str(message.get("content", ""))
+    return str(message)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Handlers
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -117,7 +128,7 @@ def handle_start(user_id: int, chat_id: int, first_name: str):
     if student and student.get("registered"):
         send(chat_id,
              f"👋 Welcome back, *{student['name']}*!\n\n"
-             f"Use /quiz to practice, or ask me anything about the course.\n"
+             f"Use /learn to start an adaptive activity, or ask me anything about the course.\n"
              f"Type /progress to see your mastery.")
         SESSIONS[user_id] = {"state": STATES["IDLE"], "data": {}}
         return
@@ -130,34 +141,53 @@ def handle_start(user_id: int, chat_id: int, first_name: str):
          "Let's get you set up! First — *what's your name?*")
 
 
-def handle_quiz(user_id: int, chat_id: int):
-    """/quiz: run the quiz graph (it picks a question and pauses at interrupt),
-    then send the question with answer buttons to the student."""
+def handle_learning_activity(user_id: int, chat_id: int):
+    """/learn: run the adaptive learning graph and send the chosen activity."""
     student = db.get_student(user_id)
     if not student or not student.get("registered"):
         send(chat_id, "Please send /start to register first 😊")
         return
 
-    # Each quiz gets its own thread so state doesn't bleed between sessions
-    thread_id = f"{user_id}-quiz-{int(time.time())}"
+    # Each activity gets its own thread so state doesn't bleed between sessions
+    thread_id = f"{user_id}-activity-{int(time.time())}"
     config = {"configurable": {"thread_id": thread_id}}
-    SESSIONS.setdefault(user_id, {})["quiz_thread_id"] = thread_id
+    SESSIONS.setdefault(user_id, {})["activity_thread_id"] = thread_id
     SESSIONS[user_id]["state"] = STATES["IDLE"]
 
-    agent.quiz_graph.invoke({"learning_style": student.get("style", "analogy")}, config)
-    question = agent.quiz_graph.get_state(config).values["quiz_question"]
+    agent.learning_graph.invoke({
+        "learning_style": student.get("style", "analogy"),
+        "interests": student.get("interests", []),
+        "mastery": student.get("mastery", {}),
+    }, config)
+    graph_state = agent.learning_graph.get_state(config)
+    values = graph_state.values
+    activity_type = values.get("activity_type", "quiz")
 
-    rows = [
-        [(f"{k}. {v}", f"ans_{k}")]
-        for k, v in question["options"].items()
-    ]
+    if activity_type == "quiz":
+        question = values["quiz_question"]
+        rows = [
+            [(f"{k}. {v}", f"ans_{k}")]
+            for k, v in question["options"].items()
+        ]
 
-    send(chat_id,
-         f"📝 *Quiz Time, {student['name']}!*\n"
-         f"Concept: *{question['concept']}*\n"
-         f"{'─' * 32}\n\n"
-         f"*{question['question']}*",
-         reply_markup=inline_kb(rows))
+        send(chat_id,
+             f"📝 *Adaptive Activity, {student['name']}!*\n"
+             f"Type: *Quiz*\n"
+             f"Concept: *{question['concept']}*\n"
+             f"{'─' * 32}\n\n"
+             f"*{question['question']}*",
+             reply_markup=inline_kb(rows))
+        return
+
+    interrupts = graph_state.tasks[0].interrupts if graph_state.tasks else []
+    activity_prompt = interrupts[0].value if interrupts else "Please submit your response to this activity."
+    SESSIONS[user_id]["state"] = STATES["WAIT_ACTIVITY_SUBMISSION"]
+    send(chat_id, activity_prompt, parse_mode=None)
+
+
+def handle_quiz(user_id: int, chat_id: int):
+    """/quiz compatibility alias for the adaptive learning activity entry."""
+    handle_learning_activity(user_id, chat_id)
 
 
 def handle_progress(user_id: int, chat_id: int):
@@ -180,7 +210,7 @@ def handle_progress(user_id: int, chat_id: int):
         lines.append(f"{bar} *{concept}*\n`{pb}` {score}% — {status}")
 
     lines.append(f"\n📝 Quizzes completed: {quiz_count}")
-    lines.append("Keep it up! Use /quiz to practice. 🚀")
+    lines.append("Keep it up! Use /learn to practice. 🚀")
     send(chat_id, "\n\n".join(lines))
 
 
@@ -189,7 +219,8 @@ def handle_help(chat_id: int):
     send(chat_id,
          "🤖 *Micro-Adaptive Bot — Help*\n\n"
          "• /start — Register or welcome\n"
-         "• /quiz — Take a quiz question\n"
+         "• /learn — Start an adaptive learning activity\n"
+         "• /quiz — Start an adaptive activity, usually a quiz\n"
          "• /progress — View your mastery\n"
          "• /help — Show this message\n\n"
          "💬 Or just *type any question* about the course!\n\n"
@@ -203,22 +234,22 @@ def handle_answer_callback(user_id: int, chat_id: int, msg_id: int,
     selected = data.replace("ans_", "")
 
     session = SESSIONS.get(user_id, {})
-    thread_id = session.get("quiz_thread_id")
+    thread_id = session.get("activity_thread_id") or session.get("quiz_thread_id")
     if not thread_id:
-        edit(chat_id, msg_id, "This quiz expired. Send /quiz for a new one.")
+        edit(chat_id, msg_id, "This activity expired. Send /learn for a new one.")
         return
 
     config = {"configurable": {"thread_id": thread_id}}
 
     # Check the graph is actually waiting
-    if not agent.quiz_graph.get_state(config).next:
-        edit(chat_id, msg_id, "This quiz expired. Send /quiz for a new one.")
+    if not agent.learning_graph.get_state(config).next:
+        edit(chat_id, msg_id, "This activity expired. Send /learn for a new one.")
         return
 
     typing(chat_id)
     # Resume graph with MCQ choice
-    agent.quiz_graph.invoke(Command(resume=selected), config)
-    graph_state = agent.quiz_graph.get_state(config)
+    agent.learning_graph.invoke(Command(resume=selected), config)
+    graph_state = agent.learning_graph.get_state(config)
 
     if graph_state.next:
         # Graph paused again → entered Socratic, get the hint from interrupt
@@ -238,19 +269,24 @@ def handle_answer_callback(user_id: int, chat_id: int, msg_id: int,
         question = result.get("quiz_question", {})
         concept = question.get("concept", "")
         messages = result.get("messages", [])
-        reply = messages[-1].content if messages else "Done!"
+        reply = message_content(messages[-1]) if messages else "Done!"
 
-        if is_correct:
-            db.update_mastery(user_id, concept, +10)   # answered correctly first try
+        mastery_delta = result.get("mastery_delta", 10 if is_correct else 0)
+        if concept and mastery_delta:
+            db.update_mastery(user_id, concept, mastery_delta)
         # Wrong but no Socratic here: shouldn’t happen (wrong always goes to Socratic)
         # If it somehow lands here, don’t update mastery
         db.record_quiz_result(user_id, {
             "q_id": question.get("id"), "concept": concept,
             "selected": selected, "correct": is_correct,
+            "activity_type": result.get("activity_type", "quiz"),
+            "mastery_delta": mastery_delta,
         })
         mastery = db.get_mastery_summary(user_id).get(concept, 0)
         text = reply + f"\n\n📊 *{concept}* mastery: {mastery}%"
         SESSIONS[user_id]["state"] = STATES["IDLE"]
+        session.pop("activity_thread_id", None)
+        session.pop("quiz_thread_id", None)
         edit(chat_id, msg_id, text)
 
 
@@ -328,7 +364,8 @@ def handle_style_callback(user_id: int, chat_id: int, msg_id: int,
          f"• Interests: {interests_str}\n"
          f"• Learning Style: {style_label}\n\n"
          f"Here's what you can do:\n"
-         f"• /quiz — Take today's quiz\n"
+         f"• /learn — Start an adaptive learning activity\n"
+         f"• /quiz — Start an adaptive activity, usually a quiz\n"
          f"• /progress — View your mastery\n"
          f"• Just *ask me anything* about the course!\n\n"
          f"Let's start learning! 🚀")
@@ -358,18 +395,65 @@ def handle_text(user_id: int, chat_id: int, text: str):
              reply_markup=inline_kb(rows))
         return
 
-    # ── Socratic reply: resume the paused quiz graph ───────────────────────────
-    if state == STATES["IN_SOCRATIC"]:
-        thread_id = session.get("quiz_thread_id")
+    # ── Open activity submission: coding_task / diagram_prompt ────────────────
+    if state == STATES["WAIT_ACTIVITY_SUBMISSION"]:
+        thread_id = session.get("activity_thread_id")
         if not thread_id:
-            send(chat_id, "Session expired. Use /quiz to start a new quiz.")
+            send(chat_id, "Session expired. Use /learn to start a new activity.")
             SESSIONS[user_id]["state"] = STATES["IDLE"]
             return
 
         typing(chat_id)
         config = {"configurable": {"thread_id": thread_id}}
-        agent.quiz_graph.invoke(Command(resume=text), config)
-        graph_state = agent.quiz_graph.get_state(config)
+        agent.learning_graph.invoke(Command(resume=text), config)
+        graph_state = agent.learning_graph.get_state(config)
+
+        if graph_state.next:
+            interrupts = graph_state.tasks[0].interrupts if graph_state.tasks else []
+            prompt = interrupts[0].value if interrupts else "Please continue your response."
+            send(chat_id, prompt, parse_mode=None)
+            return
+
+        result = graph_state.values
+        messages = result.get("messages", [])
+        reply = message_content(messages[-1]) if messages else result.get("feedback", "Thanks for your submission.")
+        concept = result.get("target_concept", "")
+        activity_type = result.get("activity_type", "activity")
+        mastery_delta = result.get("mastery_delta", 0)
+        is_correct = result.get("is_correct", False)
+
+        if concept and mastery_delta:
+            db.update_mastery(user_id, concept, mastery_delta)
+        db.record_quiz_result(user_id, {
+            "q_id": None,
+            "concept": concept,
+            "selected": text,
+            "correct": is_correct,
+            "activity_type": activity_type,
+            "mastery_delta": mastery_delta,
+        })
+
+        mastery = db.get_mastery_summary(user_id).get(concept, 0) if concept else 0
+        if concept:
+            reply += f"\n\n{concept} mastery: {mastery}%"
+
+        send(chat_id, reply, parse_mode=None)
+        SESSIONS[user_id]["state"] = STATES["IDLE"]
+        session.pop("activity_thread_id", None)
+        return
+
+    # ── Socratic reply: resume the paused adaptive learning graph ─────────────
+    if state == STATES["IN_SOCRATIC"]:
+        thread_id = session.get("activity_thread_id") or session.get("quiz_thread_id")
+        if not thread_id:
+            send(chat_id, "Session expired. Use /learn to start a new activity.")
+            SESSIONS[user_id]["state"] = STATES["IDLE"]
+            return
+
+        typing(chat_id)
+        config = {"configurable": {"thread_id": thread_id}}
+        agent.learning_graph.invoke(Command(resume=text), config)
+        graph_state = agent.learning_graph.get_state(config)
 
         if graph_state.next:
             # Still in Socratic — another interrupt, send next hint
@@ -380,7 +464,7 @@ def handle_text(user_id: int, chat_id: int, text: str):
             # Socratic ended (understood or 3 rounds exhausted)
             result = graph_state.values
             messages = result.get("messages", [])
-            reply = messages[-1].content if messages else "Great effort!"
+            reply = message_content(messages[-1]) if messages else "Great effort!"
             question = result.get("quiz_question", {})
             concept = question.get("concept", "")
             is_correct = result.get("is_correct", False)
@@ -400,6 +484,7 @@ def handle_text(user_id: int, chat_id: int, text: str):
                 reply += f"\n\n{status}\n📊 *{concept}* mastery: {mastery}%"
             send(chat_id, reply)
             SESSIONS[user_id]["state"] = STATES["IDLE"]
+            session.pop("activity_thread_id", None)
             session.pop("quiz_thread_id", None)
             session.pop("mcq_selected", None)
         return
@@ -458,6 +543,8 @@ def process_update(update: dict):
 
     if text.startswith("/start"):
         handle_start(user_id, chat_id, first_name)
+    elif text.startswith("/learn"):
+        handle_learning_activity(user_id, chat_id)
     elif text.startswith("/quiz"):
         handle_quiz(user_id, chat_id)
     elif text.startswith("/progress"):
