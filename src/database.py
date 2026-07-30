@@ -75,6 +75,33 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES students(user_id) ON DELETE CASCADE
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_memories (
+                user_id INTEGER NOT NULL,
+                memory_key TEXT NOT NULL,
+                category TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, memory_key),
+                FOREIGN KEY (user_id) REFERENCES students(user_id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                content TEXT NOT NULL,
+                telegram_message_id INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES students(user_id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_conversation_messages_user_created
+            ON conversation_messages (user_id, created_at)
+        """)
 
 
 def _ensure_student(user_id: int):
@@ -272,12 +299,150 @@ def get_quiz_results(user_id: int) -> list[dict]:
     return results
 
 
+def get_recent_activity_results(user_id: int, limit: int = 5) -> list[dict]:
+    """Return a compact, recent learning history for activity selection."""
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute("""
+            SELECT concept, correct, created_at, raw_json
+            FROM quiz_results
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+        """, (user_id, limit)).fetchall()
+
+    results = []
+    for row in reversed(rows):
+        try:
+            raw = json.loads(row["raw_json"])
+        except json.JSONDecodeError:
+            raw = {}
+        results.append({
+            "activity_type": raw.get("activity_type", "quiz"),
+            "concept": row["concept"],
+            "understood": bool(row["correct"]),
+            "mastery_delta": raw.get("mastery_delta", 0),
+            "created_at": row["created_at"],
+        })
+
+    return results
+
+
+def get_conversation_summary(user_id: int) -> str:
+    """Return the single shared summary used by chat and learning activities."""
+    init_db()
+    with _connect() as conn:
+        row = conn.execute("""
+            SELECT content
+            FROM conversation_memories
+            WHERE user_id = ? AND memory_key = 'conversation_summary'
+        """, (user_id,)).fetchone()
+
+    return row["content"] if row else ""
+
+
+def upsert_conversation_summary(user_id: int, summary: str) -> None:
+    """Save one shared, durable conversation summary for a student."""
+    summary = summary.strip()
+    if not summary or len(summary) > 2_000:
+        return
+
+    init_db()
+    _ensure_student(user_id)
+    now = datetime.now().isoformat()
+
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO conversation_memories (
+                user_id, memory_key, category, content, created_at, updated_at
+            )
+            VALUES (?, 'conversation_summary', 'ongoing_context', ?, ?, ?)
+            ON CONFLICT(user_id, memory_key) DO UPDATE SET
+                content = excluded.content,
+                updated_at = excluded.updated_at
+        """, (user_id, summary, now, now))
+
+
+def record_conversation_message(
+    user_id: int,
+    role: str,
+    content: str,
+    telegram_message_id: int | None = None,
+) -> None:
+    """Persist one raw student or tutor message for short-term conversational context."""
+    if role not in {"user", "assistant"} or not content.strip():
+        return
+
+    init_db()
+    _ensure_student(user_id)
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO conversation_messages (
+                user_id, role, content, telegram_message_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, role, content.strip(), telegram_message_id, datetime.now().isoformat()))
+
+
+def update_conversation_message(
+    user_id: int,
+    telegram_message_id: int,
+    content: str,
+) -> None:
+    """Keep an edited Telegram bot message as one transcript entry."""
+    if not content.strip():
+        return
+
+    init_db()
+    with _connect() as conn:
+        cursor = conn.execute("""
+            UPDATE conversation_messages
+            SET content = ?
+            WHERE user_id = ?
+              AND role = 'assistant'
+              AND telegram_message_id = ?
+        """, (content.strip(), user_id, telegram_message_id))
+
+    if cursor.rowcount == 0:
+        record_conversation_message(user_id, "assistant", content, telegram_message_id)
+
+
+def get_recent_conversation_messages(
+    user_id: int,
+    limit: int = 10,
+    role: str | None = None,
+) -> list[dict]:
+    """Return the latest raw conversation turns in chronological order."""
+    init_db()
+    with _connect() as conn:
+        if role:
+            rows = conn.execute("""
+                SELECT role, content, created_at
+                FROM conversation_messages
+                WHERE user_id = ? AND role = ?
+                ORDER BY id DESC
+                LIMIT ?
+            """, (user_id, role, limit)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT role, content, created_at
+                FROM conversation_messages
+                WHERE user_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+            """, (user_id, limit)).fetchall()
+
+    return [dict(row) for row in reversed(rows)]
+
+
 def clear_all():
     """
     Test helper. Do not call from application code.
     """
     init_db()
     with _connect() as conn:
+        conn.execute("DELETE FROM conversation_messages")
+        conn.execute("DELETE FROM conversation_memories")
         conn.execute("DELETE FROM quiz_results")
         conn.execute("DELETE FROM mastery")
         conn.execute("DELETE FROM students")

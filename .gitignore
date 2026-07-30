@@ -24,6 +24,9 @@ src/.env
 chroma_db/
 src/chroma_db/
 
+# Local SQLite database
+micro_adaptive.db
+src/micro_adaptive.db
+
 # cached file
 past demo/
-

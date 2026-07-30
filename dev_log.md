@@ -197,3 +197,141 @@ bot.py 状态机新增 `IN_SOCRATIC` 状态，学生文字回复时走 `Command(
 - 跑通自由问答后，再考虑把 quiz / reflection 的题目生成逐步从 hardcoded 数据迁移到课程材料驱动
 
 ---
+
+## 2026-07-21 — Adaptive Learning Activity + 持久化数据闭环
+
+### 做了什么
+- 将原本固定题库的 quiz flow 改为课程材料驱动的 adaptive learning flow：
+  `select_concept → retrieve_course_context → choose_activity → generate_activity`
+- 在 `agent.py` 中新增 Pedagogy decision node：`choose_activity`
+  - 输入学生 mastery、learning style、interests、目标 concept 和 RAG context
+  - 由 LLM 在受限集合中选择学习活动：`quiz` / `coding_task` / `diagram_prompt`
+  - 输出 `activity_type`、`activity_reason`、`difficulty`
+- 将生成结果统一为 `learning_activity`，避免后续 bot/UI 需要分别处理很多零散字段
+- 保留 quiz 的原有 Socratic feedback：如果 activity 是 quiz，学生答错后仍进入 Socratic loop
+- 将 Telegram 入口从单一 `/quiz` 扩展为通用 `/learn`
+  - `/learn` 启动一次 adaptive activity
+  - `/quiz` 作为兼容入口保留，内部调用同一个 learning flow
+- 将 `quiz_graph` 语义升级为 `learning_graph`
+  - 保留 `quiz_graph = learning_graph` alias，避免旧代码立即断掉
+
+### RAG / 上传材料改动
+- 前端上传材料后，FastAPI 会保存文件到 `course_materials/`
+- 上传接口改为只索引（处理）刚上传的文件：
+  `index_uploaded_material(save_path)`
+- 禁用了自动扫描整个本地 `course_materials/` 的逻辑，避免 sample/local 文件被误当成 educator 上传内容
+- 当前设计：
+  - 新上传文件 → 增量加入 Chroma
+  - 同名文件 → 删除旧 source 对应 chunks 后再加入新内容
+  - `query_rag()` 只读取已有 Chroma index，不再自动 build 本地目录
+
+### 数据库 / Dashboard
+- 实现 `src/database.py`，用 SQLite 替代 `mock_db.py`
+- 新增表：
+  - `students`：学生 profile、注册状态、quiz_count
+  - `mastery`：每个学生每个 concept 的 mastery score
+  - `quiz_results`：答题记录和历史
+- `bot.py` 改为读写 SQLite，学生注册、mastery 更新、quiz result 都会持久化
+- `api.py` 改为从 SQLite 读取学生数据，解决 bot 进程和 FastAPI 进程无法共享 in-memory mock data 的问题
+- Dashboard 去掉主要 mock data，改为从 FastAPI 拉取：
+  - `/dashboard/summary`
+  - `/students`
+  - `/students/{id}`
+  - `/course`
+  - `/teaching-intention`
+- `.gitignore` 增加 `micro_adaptive.db`，避免提交本地运行时数据库
+
+### 设计决策
+- **Socratic 不是 activity_type**
+  - `quiz` / `coding_task` / `diagram_prompt` 是学生要完成的任务
+  - `socratic_followup` 是 quiz 答错后的 feedback strategy
+  - 所以 Socratic 暂时只保留在 quiz 分支，不强行复用到 coding/diagram task
+- **LLM 做教学策略建议，代码做约束**
+  - `choose_activity` 让 LLM 根据学生画像和课程上下文做推荐
+  - 但 activity type 和 difficulty 都限制在固定集合，避免 LLM 生成未知类型导致系统无法执行
+- **先用一个 LangGraph 多 node，不急着拆多 agent**
+  - Profiler / Pedagogy / Generation 的职责先映射成 graph nodes
+  - 等流程稳定后，再决定是否需要真正拆成多个 agent 或 external tools
+- **先统一入口，再扩展评估**
+  - `/learn` 代表 adaptive weekly learning journey 的学生侧入口
+  - 现在 quiz 已有答题/评估/Socratic 闭环
+  - coding/diagram 目前只生成任务，还没有提交和评估闭环
+
+### 遇到的问题 & 解决方法
+- 前端上传显示 `Failed to fetch`
+  - 原因：FastAPI 后端没有在 `127.0.0.1:8000` 运行
+  - 解决：明确开发时需要分别启动 backend、frontend、Telegram bot
+- bot 和 dashboard 数据不同步
+  - 原因：`mock_db.py` 是 in-memory，bot.py 和 uvicorn 是两个进程，内存不共享
+  - 解决：改用 SQLite，让两个进程读写同一个 `micro_adaptive.db`
+- `choose_activity` 返回字段和 `generate_activity` 读取字段不一致
+  - 原因：最初返回 `{"activity": ...}`，但后续读取 `activity_type`
+  - 解决：统一为 `activity_type`、`activity_reason`、`difficulty`
+- 非 quiz activity 不能继续走 `check_answer`
+  - 原因：coding/diagram task 没有 A/B/C/D answer
+  - 解决：新增 `route_activity`，quiz 走 `check_answer`，非 quiz 走 `message_activity`
+
+### 当前架构
+
+```
+select_concept
+    ↓
+retrieve_course_context
+    ↓
+choose_activity
+    ↓
+generate_activity
+    ├── quiz → check_answer → socratic_followup / message_student
+    └── coding_task / diagram_prompt → message_activity → END
+```
+
+### 验证
+- Python 编译检查通过：
+  `.venv/bin/python -m py_compile src/agent.py src/bot.py src/api.py src/database.py src/course_rag.py`
+- 前端 lint 通过，无错误；仅剩一个旧 warning：`setup/course/page.tsx` 中 `Tag` import 未使用
+- `agent.learning_graph` 和兼容 alias `agent.quiz_graph` 均可正常 import
+
+### 下一步
+- 给 `coding_task` / `diagram_prompt` 增加学生提交入口
+- 新增 `evaluate_activity_response` node：
+  - quiz：继续用现有 MCQ + Socratic
+  - coding_task：评估学生提交的代码/思路
+  - diagram_prompt：评估学生提交的图或文字描述
+- 将 evaluation 结果写入 SQLite，更新 mastery
+- 后续考虑加入 `reflection` activity，但要先明确 reflection 的提交格式和评分标准
+
+---
+
+## 2026-07-31 — Activity Evaluation 与对话记忆
+
+### 做了什么
+- 完成 `coding_task` 和 `diagram_prompt` 的提交与评估闭环：学生可在 Telegram 直接提交文字说明，LLM 根据课程 RAG context 给反馈并更新 mastery。
+- quiz、coding task、diagram task 的结果统一写入 SQLite；`quiz_results` 目前也承担 activity history 的角色。
+- 新增原始对话记录 `conversation_messages`：保存学生消息、bot 回复和按钮选择。
+- 新增每个学生一条动态 `conversation_summary`：由旧 summary、学生消息和结构化学习结果更新，用于保留跨多次聊天仍有用的课程/项目背景。
+- 新增 Telegram 命令：
+  - `/history`：查看最近 10 条原始对话
+  - `/memory`：查看动态 conversation summary
+
+### 当前 Agent 输入
+- 自由会话回答：`conversation_summary + 最近10条对话 + 当前问题 + RAG`。
+- 选活动/出题：`conversation_summary + mastery + 最近5次活动结果 + RAG`。
+- Pedagogy Agent 会参考近期活动类型和结果，避免重复同一种活动，并对薄弱概念安排巩固练习。
+
+### 设计决策
+- 原始对话与 summary 分开保存：原始记录用于短期上下文和追溯；summary 用于长期、低 token 的个性化上下文。
+- summary 只采纳学生明确表达的信息和已保存的学习结果，不从 bot 回复复制课程介绍或推断学生背景。
+- 不把全部历史对话直接放入 prompt，只读取最近 10 条，避免无关信息和 token 成本不断增长。
+- 仍由业务数据库保存长期学习数据；LangGraph `MemorySaver` 只负责单次 graph workflow 的运行状态。
+
+### 验证
+- SQLite activity history 读写测试通过。
+- 原始对话持久化测试通过（包含 bot 编辑消息后的更新）。
+- Python 语法检查通过：`src/database.py`、`src/agent.py`、`src/bot.py`。
+
+### 下一步
+- 用真实 Telegram 对话验证 summary 是否保留恰当信息、不会写入无关内容。
+- 将默认 mastery concepts 改为 educator 上传课程材料后可配置/可提取的 concepts。
+- 视测试结果决定是否将 `quiz_results` 重命名为更准确的 `activity_results`。
+
+---

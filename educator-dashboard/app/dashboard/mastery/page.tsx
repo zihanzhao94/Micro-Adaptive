@@ -1,4 +1,6 @@
 'use client';
+
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell
@@ -6,26 +8,19 @@ import {
 import styles from '../dashboard.module.css';
 import masteryStyles from './mastery.module.css';
 
-const CONCEPTS = [
-  'Linear Regression', 'Gradient Descent', 'Backpropagation', 'Loss Functions',
-  'Overfitting', 'Neural Networks', 'Regularization', 'Evaluation Metrics',
-];
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://127.0.0.1:8000';
 
-const STUDENTS = [
-  { name: 'Alice T.', scores: [95, 80, 70, 85, 60, 55, 75, 90] },
-  { name: 'Bob C.', scores: [70, 65, 50, 60, 80, 40, 55, 70] },
-  { name: 'Carol L.', scores: [85, 90, 80, 75, 70, 85, 90, 80] },
-  { name: 'David K.', scores: [40, 35, 30, 45, 50, 25, 40, 55] },
-  { name: 'Eve M.', scores: [90, 85, 75, 80, 65, 70, 80, 85] },
-  { name: 'Frank N.', scores: [60, 55, 45, 50, 70, 35, 60, 65] },
-  { name: 'Grace O.', scores: [75, 70, 65, 70, 80, 60, 70, 75] },
-  { name: 'Henry P.', scores: [50, 45, 35, 55, 60, 30, 50, 60] },
-];
+type MasteryItem = {
+  concept: string;
+  score: number;
+};
 
-const conceptAvgs = CONCEPTS.map((c, ci) => ({
-  concept: c.replace(' ', '\n'),
-  avg: Math.round(STUDENTS.reduce((s, st) => s + st.scores[ci], 0) / STUDENTS.length),
-}));
+type Student = {
+  id: string;
+  name: string;
+  avgMastery: number;
+  mastery: MasteryItem[];
+};
 
 function getMasteryColor(score: number) {
   if (score >= 80) return '#10b981';
@@ -41,18 +36,66 @@ function getMasteryLabel(score: number) {
   return 'Struggling';
 }
 
+function initials(name: string) {
+  return name.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase();
+}
+
 export default function MasteryPage() {
+  const [students, setStudents] = useState<Student[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    const loadStudents = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/students`);
+        if (!response.ok) throw new Error('Could not load mastery data.');
+        const body: { students: Student[] } = await response.json();
+        setStudents(body.students);
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : 'Could not load mastery data.');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadStudents();
+  }, []);
+
+  const concepts = useMemo(() => {
+    return Array.from(new Set(students.flatMap(student => student.mastery.map(item => item.concept))));
+  }, [students]);
+
+  const conceptAvgs = useMemo(() => {
+    return concepts.map(concept => {
+      const scores = students
+        .map(student => student.mastery.find(item => item.concept === concept)?.score)
+        .filter((score): score is number => typeof score === 'number');
+
+      return {
+        concept: concept.replace(' ', '\n'),
+        fullConcept: concept,
+        avg: scores.length ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length) : 0,
+      };
+    });
+  }, [concepts, students]);
+
   return (
     <>
       <div className={styles.topBar}>
         <div className={styles.topBarLeft}>
           <div className={styles.topBarGreeting}>Class Mastery Overview</div>
-          <div className={styles.topBarDate}>CS5228 · Introduction to ML · 28 students</div>
+          <div className={styles.topBarDate}>{students.length} students</div>
         </div>
       </div>
 
       <div className={styles.pageContent}>
-        {/* Concept Avg Chart */}
+        {message && (
+          <div className="card" style={{ marginBottom: 16, color: 'var(--danger)', fontSize: 13 }}>
+            {message}
+          </div>
+        )}
+
         <div className="card" style={{ marginBottom: '20px' }}>
           <div className="section-header">
             <div>
@@ -68,25 +111,31 @@ export default function MasteryPage() {
               ))}
             </div>
           </div>
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={conceptAvgs} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-              <XAxis dataKey="concept" tick={{ fill: 'var(--text-muted)', fontSize: 10 }} />
-              <YAxis domain={[0, 100]} tick={{ fill: 'var(--text-muted)', fontSize: 10 }} />
-              <Tooltip
-                contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
-                labelStyle={{ color: 'var(--text-primary)' }}
-                formatter={(v) => [`${Number(v ?? 0)}%`, 'Avg Mastery']}
-              />
-              <Bar dataKey="avg" radius={[4, 4, 0, 0]}>
-                {conceptAvgs.map((entry, i) => (
-                  <Cell key={i} fill={getMasteryColor(entry.avg)} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+
+          {conceptAvgs.length > 0 ? (
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={conceptAvgs} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+                <XAxis dataKey="concept" tick={{ fill: 'var(--text-muted)', fontSize: 10 }} />
+                <YAxis domain={[0, 100]} tick={{ fill: 'var(--text-muted)', fontSize: 10 }} />
+                <Tooltip
+                  contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
+                  labelStyle={{ color: 'var(--text-primary)' }}
+                  formatter={(v) => [`${Number(v ?? 0)}%`, 'Avg Mastery']}
+                />
+                <Bar dataKey="avg" radius={[4, 4, 0, 0]}>
+                  {conceptAvgs.map((entry, i) => (
+                    <Cell key={i} fill={getMasteryColor(entry.avg)} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>
+              {loading ? 'Loading mastery data...' : 'No mastery data yet.'}
+            </div>
+          )}
         </div>
 
-        {/* Heatmap */}
         <div className="card">
           <div className="section-header">
             <div>
@@ -95,48 +144,52 @@ export default function MasteryPage() {
             </div>
           </div>
 
-          <div className={masteryStyles.heatmapWrap}>
-            {/* Column headers */}
-            <div className={masteryStyles.heatmapHeader}>
-              <div className={masteryStyles.heatmapStudentCol} />
-              {CONCEPTS.map(c => (
-                <div key={c} className={masteryStyles.heatmapConceptLabel}>{c}</div>
-              ))}
-            </div>
+          {students.length > 0 && concepts.length > 0 ? (
+            <div className={masteryStyles.heatmapWrap}>
+              <div className={masteryStyles.heatmapHeader}>
+                <div className={masteryStyles.heatmapStudentCol} />
+                {concepts.map(concept => (
+                  <div key={concept} className={masteryStyles.heatmapConceptLabel}>{concept}</div>
+                ))}
+              </div>
 
-            {/* Rows */}
-            {STUDENTS.map((student, si) => {
-              const avg = Math.round(student.scores.reduce((a, b) => a + b, 0) / student.scores.length);
-              return (
+              {students.map(student => (
                 <Link
-                  key={student.name}
-                  href={`/dashboard/student/${si + 1}`}
-                  id={`student-row-${si + 1}`}
+                  key={student.id}
+                  href={`/dashboard/student/${student.id}`}
+                  id={`student-row-${student.id}`}
                   className={masteryStyles.heatmapRow}
                 >
                   <div className={masteryStyles.heatmapStudentName}>
-                    <div className={masteryStyles.studentAvatar} style={{ background: getMasteryColor(avg) + '22', color: getMasteryColor(avg) }}>
-                      {student.name[0]}
+                    <div className={masteryStyles.studentAvatar} style={{ background: getMasteryColor(student.avgMastery) + '22', color: getMasteryColor(student.avgMastery) }}>
+                      {initials(student.name)}
                     </div>
                     {student.name}
                   </div>
-                  {student.scores.map((score, ci) => (
-                    <div
-                      key={ci}
-                      className={masteryStyles.heatmapCell}
-                      title={`${student.name} · ${CONCEPTS[ci]}: ${score}% (${getMasteryLabel(score)})`}
-                      style={{ background: getMasteryColor(score) + '28', borderColor: getMasteryColor(score) + '50' }}
-                    >
-                      <span style={{ color: getMasteryColor(score), fontWeight: 700, fontSize: 12 }}>{score}%</span>
-                    </div>
-                  ))}
-                  <span className={`badge ${avg >= 80 ? 'badge-success' : avg >= 60 ? 'badge-warning' : 'badge-danger'}`} style={{ marginLeft: '8px' }}>
-                    {avg}%
+                  {concepts.map(concept => {
+                    const score = student.mastery.find(item => item.concept === concept)?.score ?? 0;
+                    return (
+                      <div
+                        key={concept}
+                        className={masteryStyles.heatmapCell}
+                        title={`${student.name} · ${concept}: ${score}% (${getMasteryLabel(score)})`}
+                        style={{ background: getMasteryColor(score) + '28', borderColor: getMasteryColor(score) + '50' }}
+                      >
+                        <span style={{ color: getMasteryColor(score), fontWeight: 700, fontSize: 12 }}>{score}%</span>
+                      </div>
+                    );
+                  })}
+                  <span className={`badge ${student.avgMastery >= 80 ? 'badge-success' : student.avgMastery >= 60 ? 'badge-warning' : 'badge-danger'}`} style={{ marginLeft: '8px' }}>
+                    {student.avgMastery}%
                   </span>
                 </Link>
-              );
-            })}
-          </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>
+              {loading ? 'Loading mastery data...' : 'No student mastery data yet.'}
+            </div>
+          )}
         </div>
       </div>
     </>

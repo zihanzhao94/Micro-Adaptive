@@ -44,6 +44,9 @@ log = logging.getLogger(__name__)
 # ── Conversation state (in-memory) ────────────────────────────────────────────
 # user_id → {"state": str, "data": dict}
 SESSIONS: dict = {}
+# The bot currently supports direct student chats, so this maps outgoing replies
+# back to the student whose raw transcript should be updated.
+CHAT_USERS: dict[int, int] = {}
 
 STATES = {
     "IDLE":        "idle",
@@ -80,7 +83,12 @@ def send(chat_id: int, text: str, reply_markup=None, parse_mode="Markdown"):
         payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    return api("sendMessage", **payload)
+    response = api("sendMessage", **payload)
+    user_id = CHAT_USERS.get(chat_id)
+    message_id = response.get("result", {}).get("message_id")
+    if user_id and message_id:
+        db.record_conversation_message(user_id, "assistant", text, message_id)
+    return response
 
 
 def edit(chat_id: int, msg_id: int, text: str, reply_markup=None, parse_mode="Markdown"):
@@ -89,7 +97,11 @@ def edit(chat_id: int, msg_id: int, text: str, reply_markup=None, parse_mode="Ma
         payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    return api("editMessageText", **payload)
+    response = api("editMessageText", **payload)
+    user_id = CHAT_USERS.get(chat_id)
+    if user_id and response.get("ok"):
+        db.update_conversation_message(user_id, msg_id, text)
+    return response
 
 
 def answer_callback(callback_id: str, text: str = "", show_alert=False):
@@ -118,6 +130,22 @@ def message_content(message) -> str:
     return str(message)
 
 
+def refresh_conversation_summary(user_id: int) -> None:
+    """Refresh the one summary shared by free chat and completed activities."""
+    try:
+        student_messages = db.get_recent_conversation_messages(user_id, limit=12, role="user")
+        learning_history = db.get_recent_activity_results(user_id, limit=5)
+        existing_summary = db.get_conversation_summary(user_id)
+        summary = agent.summarize_conversation(
+            existing_summary,
+            student_messages,
+            learning_history,
+        )
+        db.upsert_conversation_summary(user_id, summary)
+    except Exception:
+        log.exception("Could not refresh conversation summary for user %s", user_id)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Handlers
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -141,11 +169,32 @@ def handle_start(user_id: int, chat_id: int, first_name: str):
          "Let's get you set up! First — *what's your name?*")
 
 
-def handle_learning_activity(user_id: int, chat_id: int):
+def parse_forced_activity_type(text: str) -> str:
+    parts = text.strip().split()
+    if len(parts) < 2:
+        return ""
+
+    requested = parts[1].lower()
+    aliases = {
+        "quiz": "quiz",
+        "coding": "coding_task",
+        "code": "coding_task",
+        "coding_task": "coding_task",
+        "diagram": "diagram_prompt",
+        "diagram_prompt": "diagram_prompt",
+    }
+    return aliases.get(requested, "unsupported")
+
+
+def handle_learning_activity(user_id: int, chat_id: int, forced_activity_type: str = ""):
     """/learn: run the adaptive learning graph and send the chosen activity."""
     student = db.get_student(user_id)
     if not student or not student.get("registered"):
         send(chat_id, "Please send /start to register first 😊")
+        return
+
+    if forced_activity_type == "unsupported":
+        send(chat_id, "Unsupported test activity. Use /learn quiz, /learn coding, or /learn diagram.")
         return
 
     # Each activity gets its own thread so state doesn't bleed between sessions
@@ -154,11 +203,17 @@ def handle_learning_activity(user_id: int, chat_id: int):
     SESSIONS.setdefault(user_id, {})["activity_thread_id"] = thread_id
     SESSIONS[user_id]["state"] = STATES["IDLE"]
 
-    agent.learning_graph.invoke({
+    graph_input = {
         "learning_style": student.get("style", "analogy"),
         "interests": student.get("interests", []),
         "mastery": student.get("mastery", {}),
-    }, config)
+        "conversation_summary": db.get_conversation_summary(user_id),
+        "learning_history": db.get_recent_activity_results(user_id),
+    }
+    if forced_activity_type:
+        graph_input["forced_activity_type"] = forced_activity_type
+
+    agent.learning_graph.invoke(graph_input, config)
     graph_state = agent.learning_graph.get_state(config)
     values = graph_state.values
     activity_type = values.get("activity_type", "quiz")
@@ -187,7 +242,7 @@ def handle_learning_activity(user_id: int, chat_id: int):
 
 def handle_quiz(user_id: int, chat_id: int):
     """/quiz compatibility alias for the adaptive learning activity entry."""
-    handle_learning_activity(user_id, chat_id)
+    handle_learning_activity(user_id, chat_id, forced_activity_type="quiz")
 
 
 def handle_progress(user_id: int, chat_id: int):
@@ -214,14 +269,53 @@ def handle_progress(user_id: int, chat_id: int):
     send(chat_id, "\n\n".join(lines))
 
 
+def handle_memory(user_id: int, chat_id: int):
+    """/memory: show the summary shared by chat and learning activities."""
+    student = db.get_student(user_id)
+    if not student or not student.get("registered"):
+        send(chat_id, "Please send /start to register first.")
+        return
+
+    summary = db.get_conversation_summary(user_id)
+    if not summary:
+        send(chat_id, "I have not saved a shared conversation summary yet.")
+        return
+
+    send(chat_id, f"*Shared conversation summary*\n\n{summary}")
+
+
+def handle_history(user_id: int, chat_id: int):
+    """/history: show a compact view of the most recent raw chat transcript."""
+    student = db.get_student(user_id)
+    if not student or not student.get("registered"):
+        send(chat_id, "Please send /start to register first.")
+        return
+
+    messages = db.get_recent_conversation_messages(user_id, limit=10)
+    if not messages:
+        send(chat_id, "No conversation messages have been saved yet.")
+        return
+
+    lines = ["Recent conversation history:"]
+    for message in messages:
+        speaker = "You" if message["role"] == "user" else "Tutor"
+        content = message["content"]
+        if len(content) > 320:
+            content = f"{content[:317]}..."
+        lines.append(f"{speaker}: {content}")
+    send(chat_id, "\n\n".join(lines), parse_mode=None)
+
+
 def handle_help(chat_id: int):
     """/help: list all available commands."""
     send(chat_id,
          "🤖 *Micro-Adaptive Bot — Help*\n\n"
          "• /start — Register or welcome\n"
          "• /learn — Start an adaptive learning activity\n"
-         "• /quiz — Start an adaptive activity, usually a quiz\n"
+         "• /quiz — Start a quiz activity\n"
          "• /progress — View your mastery\n"
+         "• /memory — View remembered conversation context\n"
+         "• /history — View recent saved conversation messages\n"
          "• /help — Show this message\n\n"
          "💬 Or just *type any question* about the course!\n\n"
          "_Examples: 'What is gradient descent?' / 'Explain backpropagation'_")
@@ -288,6 +382,7 @@ def handle_answer_callback(user_id: int, chat_id: int, msg_id: int,
         session.pop("activity_thread_id", None)
         session.pop("quiz_thread_id", None)
         edit(chat_id, msg_id, text)
+        refresh_conversation_summary(user_id)
 
 
 def handle_interest_callback(user_id: int, chat_id: int, msg_id: int,
@@ -365,7 +460,7 @@ def handle_style_callback(user_id: int, chat_id: int, msg_id: int,
          f"• Learning Style: {style_label}\n\n"
          f"Here's what you can do:\n"
          f"• /learn — Start an adaptive learning activity\n"
-         f"• /quiz — Start an adaptive activity, usually a quiz\n"
+         f"• /quiz — Start a quiz activity\n"
          f"• /progress — View your mastery\n"
          f"• Just *ask me anything* about the course!\n\n"
          f"Let's start learning! 🚀")
@@ -438,6 +533,7 @@ def handle_text(user_id: int, chat_id: int, text: str):
             reply += f"\n\n{concept} mastery: {mastery}%"
 
         send(chat_id, reply, parse_mode=None)
+        refresh_conversation_summary(user_id)
         SESSIONS[user_id]["state"] = STATES["IDLE"]
         session.pop("activity_thread_id", None)
         return
@@ -483,6 +579,7 @@ def handle_text(user_id: int, chat_id: int, text: str):
                 status = "💡 Keep practising!" if not is_correct else "🎉 You got there!"
                 reply += f"\n\n{status}\n📊 *{concept}* mastery: {mastery}%"
             send(chat_id, reply)
+            refresh_conversation_summary(user_id)
             SESSIONS[user_id]["state"] = STATES["IDLE"]
             session.pop("activity_thread_id", None)
             session.pop("quiz_thread_id", None)
@@ -497,9 +594,11 @@ def handle_text(user_id: int, chat_id: int, text: str):
 
     # ── Free chat: concept question ───────────────────────────────────────────
     typing(chat_id)
-    style = student.get("style", "analogy")
-    response = agent.answer(text, student)
+    conversation_summary = db.get_conversation_summary(user_id)
+    recent_messages = db.get_recent_conversation_messages(user_id, limit=10)
+    response = agent.answer(text, student, conversation_summary, recent_messages)
     send(chat_id, response)
+    refresh_conversation_summary(user_id)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -517,6 +616,8 @@ def process_update(update: dict):
         msg_id  = cq["message"]["message_id"]
         cb_id   = cq["id"]
         data    = cq.get("data", "")
+        CHAT_USERS[chat_id] = user_id
+        db.record_conversation_message(user_id, "user", f"[Button selection: {data}]")
 
         if data.startswith("ans_"):
             handle_answer_callback(user_id, chat_id, msg_id, cb_id, data)
@@ -540,15 +641,21 @@ def process_update(update: dict):
         return
 
     log.info(f"[{first_name}] {text}")
+    CHAT_USERS[chat_id] = user_id
+    db.record_conversation_message(user_id, "user", text)
 
     if text.startswith("/start"):
         handle_start(user_id, chat_id, first_name)
     elif text.startswith("/learn"):
-        handle_learning_activity(user_id, chat_id)
+        handle_learning_activity(user_id, chat_id, parse_forced_activity_type(text))
     elif text.startswith("/quiz"):
         handle_quiz(user_id, chat_id)
     elif text.startswith("/progress"):
         handle_progress(user_id, chat_id)
+    elif text.startswith("/memory"):
+        handle_memory(user_id, chat_id)
+    elif text.startswith("/history"):
+        handle_history(user_id, chat_id)
     elif text.startswith("/help"):
         handle_help(chat_id)
     else:

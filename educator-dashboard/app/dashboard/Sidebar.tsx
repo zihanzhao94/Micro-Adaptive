@@ -1,17 +1,21 @@
 'use client';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useEffect, useState } from 'react';
 import {
   GraduationCap, LayoutDashboard, BookOpen, Lightbulb, Users,
   Settings, LogOut, ChevronRight
 } from 'lucide-react';
 import styles from './Sidebar.module.css';
 
-// ⚠️ Mock data — replace with context/auth state when backend is ready
-const MOCK_COURSE = {
-  name: 'Introduction to ML',
-  code: 'CS5228',
-  year: 'AY2025/26',
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://127.0.0.1:8000';
+
+type CourseProfile = {
+  name: string;
+  code: string;
+  year: string;
+  educatorName: string;
+  educatorEmail: string;
 };
 
 const NAV = [
@@ -23,6 +27,24 @@ const NAV = [
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const [course, setCourse] = useState<CourseProfile>({
+    name: 'Course Workspace',
+    code: 'Course',
+    year: 'Current',
+    educatorName: 'Educator',
+    educatorEmail: '',
+  });
+
+  useEffect(() => {
+    const loadCourse = async () => {
+      const response = await fetch(`${API_BASE}/course`);
+      if (!response.ok) return;
+      const body: { course: CourseProfile } = await response.json();
+      setCourse(body.course);
+    };
+
+    loadCourse().catch(() => undefined);
+  }, []);
 
   return (
     <aside className={styles.sidebar}>
@@ -37,12 +59,11 @@ export default function Sidebar() {
         </div>
       </div>
 
-      {/* Course Badge — shows active course (mock until auth context added) */}
       <div className={styles.courseBadge}>
         <div className={styles.courseDot} />
         <div>
-          <div className={styles.courseName}>{MOCK_COURSE.name}</div>
-          <div className={styles.courseCode}>{MOCK_COURSE.code} · {MOCK_COURSE.year}</div>
+          <div className={styles.courseName}>{course.name}</div>
+          <div className={styles.courseCode}>{course.code} · {course.year}</div>
         </div>
         <ChevronRight size={14} className={styles.courseChevron} />
       </div>
@@ -71,13 +92,12 @@ export default function Sidebar() {
         })}
       </nav>
 
-      {/* Bottom — user info (mock until auth ready) */}
       <div className={styles.sidebarBottom}>
         <div className={styles.userRow}>
-          <div className={styles.avatar}>DR</div>
+          <div className={styles.avatar}>{course.educatorName.slice(0, 2).toUpperCase()}</div>
           <div className={styles.userInfo}>
-            <div className={styles.userName}>Dr. ABC</div>
-            <div className={styles.userEmail}>abc@nus.edu.sg</div>
+            <div className={styles.userName}>{course.educatorName}</div>
+            <div className={styles.userEmail}>{course.educatorEmail || 'No email'}</div>
           </div>
         </div>
         <div className={styles.bottomActions}>
