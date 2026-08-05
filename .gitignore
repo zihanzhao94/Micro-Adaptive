@@ -23,6 +23,10 @@ src/.env
 # Vector database cache
 chroma_db/
 src/chroma_db/
+chroma_db.backup-*/
+
+# Educator-uploaded materials stay local; root sample files may remain tracked.
+course_materials/*/
 
 # Local SQLite database
 micro_adaptive.db

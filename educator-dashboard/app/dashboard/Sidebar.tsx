@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import {
-  GraduationCap, LayoutDashboard, BookOpen, Lightbulb, Users,
+  GraduationCap, LayoutDashboard, BookOpen, Lightbulb, Network, Users,
   Settings, LogOut, ChevronRight
 } from 'lucide-react';
 import styles from './Sidebar.module.css';
@@ -21,6 +21,7 @@ type CourseProfile = {
 const NAV = [
   { href: '/dashboard',            label: 'Overview',          icon: LayoutDashboard },
   { href: '/dashboard/materials',  label: 'Course Materials',  icon: BookOpen },
+  { href: '/dashboard/concepts',   label: 'Course Concepts',   icon: Network },
   { href: '/dashboard/intention',  label: 'Teaching Intention',icon: Lightbulb },
   { href: '/dashboard/students',   label: 'Students',          icon: Users },
 ];

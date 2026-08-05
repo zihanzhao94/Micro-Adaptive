@@ -11,6 +11,8 @@ interface MaterialResponse {
   filename: string;
   type: 'pdf' | 'txt';
   size_bytes: number;
+  status?: 'indexed' | 'processing' | 'error';
+  updated_at?: string;
 }
 
 interface FileItem {
@@ -38,8 +40,8 @@ function materialToFileItem(material: MaterialResponse): FileItem {
     name: material.filename,
     size: formatSize(material.size_bytes),
     type: material.type,
-    uploadedAt: 'Saved',
-    status: 'indexed',
+    uploadedAt: material.updated_at ? new Date(material.updated_at).toLocaleString() : 'Saved',
+    status: material.status ?? 'indexed',
   };
 }
 
@@ -50,7 +52,22 @@ export default function MaterialsPage() {
   const [message, setMessage] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const removeFile = (id: string) => setFiles(prev => prev.filter(f => f.id !== id));
+  const removeFile = async (file: FileItem) => {
+    if (!window.confirm(`Delete ${file.name}? This removes its indexed course content too.`)) return;
+
+    setMessage('');
+    try {
+      const response = await fetch(`${API_BASE}/materials/${encodeURIComponent(file.name)}`, {
+        method: 'DELETE',
+      });
+      const body: { materials?: MaterialResponse[]; detail?: string } = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.detail ?? 'Could not delete material.');
+      setFiles((body.materials ?? []).map(materialToFileItem));
+      setMessage('Material and its indexed content were deleted.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Could not delete material.');
+    }
+  };
 
   const loadMaterials = async () => {
     setLoading(true);
@@ -238,7 +255,7 @@ export default function MaterialsPage() {
                       </span>
                 }
               </span>
-              <button id={`remove-file-${file.id}`} className={matStyles.removeBtn} onClick={() => removeFile(file.id)} aria-label="Remove">
+              <button id={`remove-file-${file.id}`} className={matStyles.removeBtn} onClick={() => removeFile(file)} aria-label={`Delete ${file.name}`}>
                 <X size={14} />
               </button>
             </div>

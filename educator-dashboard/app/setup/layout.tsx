@@ -7,9 +7,10 @@ import styles from './setup.module.css';
 const STEPS = [
   { label: 'Create Course',       href: '/setup/course',    step: 1 },
   { label: 'Upload Materials',    href: '/setup/upload',    step: 2 },
-  { label: 'Teaching Intention',  href: '/setup/intention', step: 3 },
-  { label: 'Invite Students',     href: '/setup/invite',    step: 4 },
-  { label: 'Complete',            href: '/setup/complete',  step: 5 },
+  { label: 'Confirm Concepts',    href: '/setup/concepts',  step: 3 },
+  { label: 'Teaching Intention',  href: '/setup/intention', step: 4 },
+  { label: 'Invite Students',     href: '/setup/invite',    step: 5 },
+  { label: 'Complete',            href: '/setup/complete',  step: 6 },
 ];
 
 export default function SetupLayout({ children }: { children: React.ReactNode }) {
@@ -32,7 +33,7 @@ export default function SetupLayout({ children }: { children: React.ReactNode })
         </Link>
 
         <div className={styles.stepBadge}>
-          SETUP FLOW — Step {currentStep} of 5
+          SETUP FLOW — Step {currentStep} of 6
         </div>
 
         <Link href="/dashboard" className={styles.skipLink}>Skip setup →</Link>
@@ -42,7 +43,7 @@ export default function SetupLayout({ children }: { children: React.ReactNode })
       <div className={styles.progressBar}>
         <div
           className={styles.progressFill}
-          style={{ width: `${(currentStep / 5) * 100}%` }}
+          style={{ width: `${(currentStep / 6) * 100}%` }}
         />
       </div>
 

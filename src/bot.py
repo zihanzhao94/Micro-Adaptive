@@ -18,16 +18,19 @@ import os
 import random
 import time
 from datetime import datetime
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 import database as db
 import agent
 from langgraph.types import Command
 
 # ── Config ────────────────────────────────────────────────────────────────────
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 db.init_db()
 TOKEN = os.getenv("BOT_TOKEN", "")
 if not TOKEN:
@@ -40,6 +43,19 @@ logging.basicConfig(
     level=logging.INFO,
 )
 log = logging.getLogger(__name__)
+
+TELEGRAM_SESSION = requests.Session()
+TELEGRAM_SESSION.mount(
+    "https://",
+    HTTPAdapter(max_retries=Retry(
+        total=2,
+        connect=2,
+        read=0,
+        status=0,
+        backoff_factor=0.5,
+        allowed_methods=frozenset({"GET", "POST"}),
+    )),
+)
 
 # ── Conversation state (in-memory) ────────────────────────────────────────────
 # user_id → {"state": str, "data": dict}
@@ -67,14 +83,36 @@ STYLE_OPTIONS = {
     "📖 Direct":          "direct",
 }
 
+CAPABILITY_QUESTION_KEYWORDS = [
+    "what can you do",
+    "what can i do",
+    "how do i start",
+    "how to start",
+    "help me start",
+    "what should i do",
+    "能做什么",
+    "可以做什么",
+    "怎么开始",
+    "如何开始",
+    "怎么用",
+    "有什么功能",
+]
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Telegram API helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def api(method: str, **kwargs) -> dict:
-    r = requests.post(f"{BASE}/{method}", json=kwargs, timeout=10)
-    return r.json()
+    try:
+        response = TELEGRAM_SESSION.post(
+            f"{BASE}/{method}", json=kwargs, timeout=(5, 20),
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as exc:
+        log.warning("Telegram %s request failed: %s", method, exc)
+        return {"ok": False, "description": str(exc)}
 
 
 def send(chat_id: int, text: str, reply_markup=None, parse_mode="Markdown"):
@@ -122,6 +160,35 @@ def inline_kb(rows: list[list[tuple]]) -> dict:
     }
 
 
+def action_menu_markup() -> dict:
+    return inline_kb([
+        [("Start adaptive activity", "menu_learn")],
+        [("Take a quiz", "menu_quiz"), ("View progress", "menu_progress")],
+        [("Memory", "menu_memory"), ("History", "menu_history")],
+    ])
+
+
+def send_action_menu(chat_id: int, intro: str = ""):
+    text = intro or (
+        "*What you can do next*\n\n"
+        "Choose an action below, or just type a course question in natural language."
+    )
+    send(chat_id, text, reply_markup=action_menu_markup())
+
+
+def append_next_steps(text: str) -> str:
+    return (
+        f"{text}\n\n"
+        "Next: use /learn for another adaptive activity, /progress to check mastery, "
+        "or ask me any course question."
+    )
+
+
+def is_capability_question(text: str) -> bool:
+    normalized = text.strip().lower()
+    return any(keyword in normalized for keyword in CAPABILITY_QUESTION_KEYWORDS)
+
+
 def message_content(message) -> str:
     if hasattr(message, "content"):
         return message.content
@@ -150,7 +217,7 @@ def refresh_conversation_summary(user_id: int) -> None:
 # Handlers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def handle_start(user_id: int, chat_id: int, first_name: str):
+def handle_start(user_id: int, chat_id: int, first_name: str, course_id: str | None = None):
     """/start: welcome returning users; start onboarding (ask name) for new ones."""
     student = db.get_student(user_id)
     if student and student.get("registered"):
@@ -158,10 +225,19 @@ def handle_start(user_id: int, chat_id: int, first_name: str):
              f"👋 Welcome back, *{student['name']}*!\n\n"
              f"Use /learn to start an adaptive activity, or ask me anything about the course.\n"
              f"Type /progress to see your mastery.")
+        send_action_menu(chat_id)
         SESSIONS[user_id] = {"state": STATES["IDLE"], "data": {}}
         return
 
-    SESSIONS[user_id] = {"state": STATES["WAIT_NAME"], "data": {"selected_interests": []}}
+    if course_id and not db.course_exists(course_id):
+        send(chat_id, "This course invite is no longer valid. Please ask your educator for a new link.")
+        return
+
+    selected_course_id = course_id or db.get_active_course_id()
+    SESSIONS[user_id] = {
+        "state": STATES["WAIT_NAME"],
+        "data": {"selected_interests": [], "course_id": selected_course_id},
+    }
     send(chat_id,
          "🎓 *Welcome to Micro-Adaptive Learning!*\n\n"
          "I'm your personal AI tutor. I'll send personalised quizzes, "
@@ -206,6 +282,8 @@ def handle_learning_activity(user_id: int, chat_id: int, forced_activity_type: s
     graph_input = {
         "learning_style": student.get("style", "analogy"),
         "interests": student.get("interests", []),
+        "course_id": student.get("course_id", "default"),
+        "course_concepts": db.get_course_concept_records(student.get("course_id", "default")),
         "mastery": student.get("mastery", {}),
         "conversation_summary": db.get_conversation_summary(user_id),
         "learning_history": db.get_recent_activity_results(user_id),
@@ -266,7 +344,7 @@ def handle_progress(user_id: int, chat_id: int):
 
     lines.append(f"\n📝 Quizzes completed: {quiz_count}")
     lines.append("Keep it up! Use /learn to practice. 🚀")
-    send(chat_id, "\n\n".join(lines))
+    send(chat_id, "\n\n".join(lines), reply_markup=action_menu_markup())
 
 
 def handle_memory(user_id: int, chat_id: int):
@@ -318,7 +396,26 @@ def handle_help(chat_id: int):
          "• /history — View recent saved conversation messages\n"
          "• /help — Show this message\n\n"
          "💬 Or just *type any question* about the course!\n\n"
-         "_Examples: 'What is gradient descent?' / 'Explain backpropagation'_")
+         "_Examples: 'What is gradient descent?' / 'Explain backpropagation'_",
+         reply_markup=action_menu_markup())
+
+
+def handle_menu_callback(user_id: int, chat_id: int, msg_id: int,
+                         callback_id: str, data: str):
+    """Main menu buttons: make common commands discoverable without typing."""
+    answer_callback(callback_id)
+    if data == "menu_learn":
+        handle_learning_activity(user_id, chat_id)
+    elif data == "menu_quiz":
+        handle_quiz(user_id, chat_id)
+    elif data == "menu_progress":
+        handle_progress(user_id, chat_id)
+    elif data == "menu_memory":
+        handle_memory(user_id, chat_id)
+    elif data == "menu_history":
+        handle_history(user_id, chat_id)
+    else:
+        edit(chat_id, msg_id, "Unknown menu action. Use /help to see available options.")
 
 def handle_answer_callback(user_id: int, chat_id: int, msg_id: int,
                            callback_id: str, data: str):
@@ -367,7 +464,7 @@ def handle_answer_callback(user_id: int, chat_id: int, msg_id: int,
 
         mastery_delta = result.get("mastery_delta", 10 if is_correct else 0)
         if concept and mastery_delta:
-            db.update_mastery(user_id, concept, mastery_delta)
+            db.update_mastery(user_id, concept, mastery_delta, concept_id=result.get("target_concept_id"))
         # Wrong but no Socratic here: shouldn’t happen (wrong always goes to Socratic)
         # If it somehow lands here, don’t update mastery
         db.record_quiz_result(user_id, {
@@ -375,13 +472,14 @@ def handle_answer_callback(user_id: int, chat_id: int, msg_id: int,
             "selected": selected, "correct": is_correct,
             "activity_type": result.get("activity_type", "quiz"),
             "mastery_delta": mastery_delta,
+            "concept_id": result.get("target_concept_id"),
         })
         mastery = db.get_mastery_summary(user_id).get(concept, 0)
         text = reply + f"\n\n📊 *{concept}* mastery: {mastery}%"
         SESSIONS[user_id]["state"] = STATES["IDLE"]
         session.pop("activity_thread_id", None)
         session.pop("quiz_thread_id", None)
-        edit(chat_id, msg_id, text)
+        edit(chat_id, msg_id, append_next_steps(text), reply_markup=action_menu_markup())
         refresh_conversation_summary(user_id)
 
 
@@ -449,6 +547,7 @@ def handle_style_callback(user_id: int, chat_id: int, msg_id: int,
         "style": style_key,
         "registered": True,
         "joined_at": datetime.now().isoformat(),
+        "course_id": sdata.get("course_id", db.get_active_course_id()),
     })
 
     SESSIONS[user_id] = {"state": STATES["IDLE"], "data": {}}
@@ -463,7 +562,8 @@ def handle_style_callback(user_id: int, chat_id: int, msg_id: int,
          f"• /quiz — Start a quiz activity\n"
          f"• /progress — View your mastery\n"
          f"• Just *ask me anything* about the course!\n\n"
-         f"Let's start learning! 🚀")
+         f"Let's start learning! 🚀",
+         reply_markup=action_menu_markup())
 
 
 def handle_text(user_id: int, chat_id: int, text: str):
@@ -518,7 +618,7 @@ def handle_text(user_id: int, chat_id: int, text: str):
         is_correct = result.get("is_correct", False)
 
         if concept and mastery_delta:
-            db.update_mastery(user_id, concept, mastery_delta)
+            db.update_mastery(user_id, concept, mastery_delta, concept_id=result.get("target_concept_id"))
         db.record_quiz_result(user_id, {
             "q_id": None,
             "concept": concept,
@@ -526,13 +626,14 @@ def handle_text(user_id: int, chat_id: int, text: str):
             "correct": is_correct,
             "activity_type": activity_type,
             "mastery_delta": mastery_delta,
+            "concept_id": result.get("target_concept_id"),
         })
 
         mastery = db.get_mastery_summary(user_id).get(concept, 0) if concept else 0
         if concept:
             reply += f"\n\n{concept} mastery: {mastery}%"
 
-        send(chat_id, reply, parse_mode=None)
+        send(chat_id, append_next_steps(reply), reply_markup=action_menu_markup(), parse_mode=None)
         refresh_conversation_summary(user_id)
         SESSIONS[user_id]["state"] = STATES["IDLE"]
         session.pop("activity_thread_id", None)
@@ -569,16 +670,17 @@ def handle_text(user_id: int, chat_id: int, text: str):
                 # Socratic success: partial credit (+3, needed help but got there)
                 # Socratic failure: small penalty (-5, didn’t understand even with hints)
                 delta = +3 if is_correct else -5
-                db.update_mastery(user_id, concept, delta)
+                db.update_mastery(user_id, concept, delta, concept_id=result.get("target_concept_id"))
                 db.record_quiz_result(user_id, {
                     "q_id": question.get("id"), "concept": concept,
                     "selected": session.get("mcq_selected", ""),
                     "correct": is_correct,
+                    "concept_id": result.get("target_concept_id"),
                 })
                 mastery = db.get_mastery_summary(user_id).get(concept, 0)
                 status = "💡 Keep practising!" if not is_correct else "🎉 You got there!"
                 reply += f"\n\n{status}\n📊 *{concept}* mastery: {mastery}%"
-            send(chat_id, reply)
+            send(chat_id, append_next_steps(reply), reply_markup=action_menu_markup())
             refresh_conversation_summary(user_id)
             SESSIONS[user_id]["state"] = STATES["IDLE"]
             session.pop("activity_thread_id", None)
@@ -590,6 +692,10 @@ def handle_text(user_id: int, chat_id: int, text: str):
     student = db.get_student(user_id)
     if not student or not student.get("registered"):
         send(chat_id, "👋 Hi! Please send /start to register first.")
+        return
+
+    if is_capability_question(text):
+        send_action_menu(chat_id)
         return
 
     # ── Free chat: concept question ───────────────────────────────────────────
@@ -625,6 +731,8 @@ def process_update(update: dict):
             handle_interest_callback(user_id, chat_id, msg_id, cb_id, data)
         elif data.startswith("style_"):
             handle_style_callback(user_id, chat_id, msg_id, cb_id, data)
+        elif data.startswith("menu_"):
+            handle_menu_callback(user_id, chat_id, msg_id, cb_id, data)
         return
 
     # Handle regular messages
@@ -645,7 +753,10 @@ def process_update(update: dict):
     db.record_conversation_message(user_id, "user", text)
 
     if text.startswith("/start"):
-        handle_start(user_id, chat_id, first_name)
+        parts = text.split(maxsplit=1)
+        payload = parts[1].strip() if len(parts) > 1 else ""
+        course_id = payload.removeprefix("course_") if payload.startswith("course_") else None
+        handle_start(user_id, chat_id, first_name, course_id)
     elif text.startswith("/learn"):
         handle_learning_activity(user_id, chat_id, parse_forced_activity_type(text))
     elif text.startswith("/quiz"):
@@ -670,7 +781,7 @@ def main():
     while True:
         #TODO: consider switching to webhook mode for production (faster, more reliable)
         try:
-            resp = requests.get(
+            resp = TELEGRAM_SESSION.get(
                 f"{BASE}/getUpdates",
                 params={"offset": offset, "timeout": 30, "allowed_updates": ["message", "callback_query"]},
                 timeout=35,

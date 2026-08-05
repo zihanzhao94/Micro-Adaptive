@@ -1,9 +1,10 @@
+import json
+import os
 from pathlib import Path
-
-from langchain_community.vectorstores import Chroma
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_openai import OpenAIEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
 
 
 MATERIALS_DIR = Path(__file__).resolve().parent.parent / "course_materials"
@@ -42,7 +43,7 @@ def load_pdf_documents(path: Path) -> list[dict]:
     return docs
 
 
-def load_material_file(path: Path) -> list[dict]:
+def load_material_file(path: Path, course_id: str = "default") -> list[dict]:
     """
     Load one uploaded course material into a common document format.
     """
@@ -51,13 +52,17 @@ def load_material_file(path: Path) -> list[dict]:
     if suffix == ".txt":
         return [{
             "source": path.name,
+            "course_id": course_id,
             "type": "txt",
             "page": None,
             "text": load_txt(path),
         }]
 
     if suffix == ".pdf":
-        return load_pdf_documents(path)
+        docs = load_pdf_documents(path)
+        for doc in docs:
+            doc["course_id"] = course_id
+        return docs
 
     raise ValueError(f"Unsupported material type: {path.suffix}")
 
@@ -89,6 +94,7 @@ def build_index(docs: list[dict]) -> Chroma:
             chunk_texts.append(chunk)
             chunk_metas.append({
                 "source": doc["source"],
+                "course_id": doc.get("course_id", "default"),
                 "type": doc.get("type"),
                 "page": doc.get("page"),
                 "chunk_id": chunk_id,
@@ -115,11 +121,14 @@ def load_existing_index() -> Chroma:
     )
 
 
-def retrieve(query: str, index: Chroma, top_k: int = TOP_K):
+def retrieve(query: str, index: Chroma, top_k: int = TOP_K, course_id: str = "default"):
     """
     Retrieve the most relevant chunks for a query.
     """
-    return index.similarity_search(query, k=top_k)
+    try:
+        return index.similarity_search(query, k=top_k, filter={"course_id": course_id})
+    except TypeError:
+        return index.similarity_search(query, k=top_k)
 
 
 def format_context(retrieved_docs) -> str:
@@ -157,6 +166,7 @@ def add_to_index(docs: list[dict]) -> Chroma:
             chunk_texts.append(chunk)
             chunk_metas.append({
                 "source": doc["source"],
+                "course_id": doc.get("course_id", "default"),
                 "type": doc.get("type"),
                 "page": doc.get("page"),
                 "chunk_id": chunk_id,
@@ -177,21 +187,42 @@ def add_to_index(docs: list[dict]) -> Chroma:
         )
     else:
         for source in {doc["source"] for doc in docs}:
+            course_ids = {doc.get("course_id", "default") for doc in docs}
             try:
-                index_cache.delete(where={"source": source})
+                for course_id in course_ids:
+                    index_cache.delete(where={"$and": [{"source": source}, {"course_id": course_id}]})
             except Exception:
-                pass
+                try:
+                    index_cache.delete(where={"source": source})
+                except Exception:
+                    pass
         index_cache.add_texts(texts=chunk_texts, metadatas=chunk_metas)
 
     return index_cache
 
 
-def index_uploaded_material(path: Path) -> Chroma:
+def index_uploaded_material(path: Path, course_id: str = "default") -> Chroma:
     """
     Index exactly one uploaded material file.
     """
-    docs = chunk_text(load_material_file(path))
+    docs = chunk_text(load_material_file(path, course_id))
     return add_to_index(docs)
+
+
+def remove_material_from_index(filename: str, course_id: str) -> None:
+    """Remove all vectors for one material without affecting another course."""
+    index = get_index()
+    if index is None:
+        return
+
+    metadata_filter = {"$and": [{"source": filename}, {"course_id": course_id}]}
+    try:
+        records = index.get(where=metadata_filter, include=[])
+        ids = records.get("ids", [])
+        if ids:
+            index.delete(ids=ids)
+    except Exception as exc:
+        raise RuntimeError(f"Could not remove indexed chunks for {filename}: {exc}") from exc
 
 
 def get_index() -> Chroma | None:
@@ -219,12 +250,71 @@ def refresh_index() -> Chroma:
     raise RuntimeError("Full local re-indexing is disabled. Use index_uploaded_material(path).")
 
 
-def query_rag(query: str) -> str:
+def query_rag(query: str, course_id: str = "default") -> str:
     index = get_index()
     if index is None:
         return ""
-    retrieved_docs = retrieve(query, index)
+    retrieved_docs = retrieve(query, index, course_id=course_id)
     return format_context(retrieved_docs)
+
+
+def suggest_course_concepts(
+    material_paths: list[Path],
+    course_name: str,
+    objectives: list[str] | None = None,
+) -> list[str]:
+    """Suggest high-level concepts from the course's uploaded materials.
+
+    The result is intentionally not persisted here. The educator must review and
+    confirm it through the API before it becomes part of the course structure.
+    """
+    excerpts: list[str] = []
+    remaining = 24_000
+    for path in material_paths:
+        if remaining <= 0 or not path.exists():
+            break
+        for doc in load_material_file(path):
+            text = doc.get("text", "").strip()
+            if not text:
+                continue
+            excerpt = text[:remaining]
+            excerpts.append(f"Source: {path.name}\n{excerpt}")
+            remaining -= len(excerpt)
+            if remaining <= 0:
+                break
+
+    if not excerpts:
+        raise ValueError("No readable uploaded course materials were found.")
+
+    prompt = """
+You are helping an educator define a course concept map.
+Based only on the uploaded course material and stated learning objectives, suggest
+5 to 12 high-level concepts for the whole course. Prefer durable teachable topics,
+not slide headings, week labels, individual tools, or overly narrow subtopics.
+Avoid duplicates and do not invent content.
+
+Return ONLY valid JSON in this exact shape:
+{"concepts": ["Concept 1", "Concept 2"]}
+"""
+    llm = ChatOpenAI(temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"))
+    raw = llm.invoke(
+        f"Course: {course_name}\n"
+        f"Learning objectives: {objectives or []}\n\n"
+        f"Uploaded material excerpts:\n{'\n\n'.join(excerpts)}\n\n{prompt}"
+    ).content.strip()
+
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.startswith("json"):
+            raw = raw[4:].strip()
+    try:
+        concepts = json.loads(raw).get("concepts", [])
+    except json.JSONDecodeError as exc:
+        raise ValueError("The concept suggestion response was not valid JSON.") from exc
+
+    if not isinstance(concepts, list):
+        raise ValueError("The concept suggestion response did not contain a concept list.")
+    return [str(concept).strip() for concept in concepts if str(concept).strip()][:12]
 
 
 if __name__ == "__main__":

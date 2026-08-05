@@ -1,28 +1,44 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Users, Copy, Check, ArrowRight, ArrowLeft, Send } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
 import styles from '../course/step.module.css';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://127.0.0.1:8000';
+
+type Invite = {
+  course_name: string;
+  bot_username: string;
+  link: string;
+};
 
 export default function InvitePage() {
   const router = useRouter();
   const [copied, setCopied] = useState(false);
+  const [invite, setInvite] = useState<Invite | null>(null);
+  const [message, setMessage] = useState('');
 
-  const botLink = 'https://t.me/MicroAdaptiveBot?start=course_CS5228_abc123';
+  useEffect(() => {
+    async function loadInvite() {
+      try {
+        const response = await fetch(`${API_BASE}/course/invite`);
+        const body: Invite & { detail?: string } = await response.json().catch(() => ({} as Invite));
+        if (!response.ok) throw new Error(body.detail ?? 'Could not generate course invite.');
+        setInvite(body);
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : 'Could not generate course invite.');
+      }
+    }
+    loadInvite();
+  }, []);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(botLink).catch(() => {});
+    if (!invite) return;
+    navigator.clipboard.writeText(invite.link).catch(() => {});
     setCopied(true);
     setTimeout(() => setCopied(false), 2500);
   };
-
-  // Generate a simple QR-like visual
-  const qrPattern = Array.from({ length: 64 }, (_, i) => {
-    // Deterministic "random" pattern for visual
-    const x = i % 8, y = Math.floor(i / 8);
-    const cornerMask = (x < 2 && y < 2) || (x > 5 && y < 2) || (x < 2 && y > 5);
-    return cornerMask || (i * 37 + 13) % 3 === 0;
-  });
 
   return (
     <div className={styles.stepContainer}>
@@ -36,6 +52,7 @@ export default function InvitePage() {
 
       <div className="card">
         <div className={styles.inviteCard}>
+          {message && <div style={{ marginBottom: 16, color: 'var(--danger)', fontSize: 13 }}>{message}</div>}
           {/* Telegram icon badge */}
           <div style={{
             display: 'inline-flex', alignItems: 'center', gap: '8px',
@@ -46,17 +63,10 @@ export default function InvitePage() {
             <span style={{ fontSize: '12px', fontWeight: 700, color: '#25D166' }}>Telegram Bot Ready</span>
           </div>
 
-          {/* QR Code visual */}
           <div className={styles.qrPlaceholder}>
-            <div className={styles.qrGrid}>
-              {qrPattern.map((filled, i) => (
-                <div
-                  key={i}
-                  className={styles.qrCell}
-                  style={{ opacity: filled ? 1 : 0 }}
-                />
-              ))}
-            </div>
+            {invite
+              ? <QRCodeSVG value={invite.link} size={168} bgColor="#ffffff" fgColor="#10101f" level="M" includeMargin />
+              : <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Generating invite...</span>}
           </div>
 
           <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '4px' }}>
@@ -64,11 +74,12 @@ export default function InvitePage() {
           </p>
 
           <div className={styles.copyRow}>
-            <span className={styles.copyLink}>{botLink}</span>
+            <span className={styles.copyLink}>{invite?.link ?? 'Generating course invite...'}</span>
             <button
               id="copyInviteLinkBtn"
               className={`btn btn-sm ${copied ? 'btn-secondary' : 'btn-primary'}`}
               onClick={handleCopy}
+              disabled={!invite}
             >
               {copied ? <><Check size={12} /> Copied!</> : <><Copy size={12} /> Copy</>}
             </button>
@@ -80,7 +91,7 @@ export default function InvitePage() {
             textAlign: 'left',
           }}>
             <p style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-              📱 Students open Telegram → search <strong style={{ color: 'var(--primary-light)' }}>@MicroAdaptiveBot</strong> → click Start → enter the course code, or use the link above.
+              📱 Students scan the QR code or open the link. Telegram starts <strong style={{ color: 'var(--primary-light)' }}>@{invite?.bot_username ?? 'your bot'}</strong> and automatically links them to <strong style={{ color: 'var(--primary-light)' }}>{invite?.course_name ?? 'this course'}</strong>.
             </p>
           </div>
         </div>

@@ -4,6 +4,41 @@
 
 ---
 
+## 2026-08-05 — Course-scoped Adaptive Learning Workflow
+
+### 做了什么
+- 将课程、上传材料和 RAG retrieval 按 `course_id` 隔离；教师上传的 PDF/TXT 保存到 `course_materials/<course_id>/`，并在 Chroma metadata 中保存课程 ID。
+- 新增教师确认课程概念的流程：LLM 可根据课程资料和 learning objectives 提供建议，但只有教师保存后才成为正式 concept map。
+- 为 concept 增加稳定 `concept_id`；教师在 dashboard 改名后，既有 mastery 和 quiz history 仍显示新名称并保留分数。
+- 新增 dashboard 的 `Course Concepts` 页面，可在 setup 后继续维护概念。
+- 将 agent 的选题改为优先使用教师确认的 concept map；新学生不会再依赖旧的 ML hardcoded concepts。
+- 将 quiz、coding task、diagram prompt 的生成与开放题评价提取到 `skills.py`，由 LangGraph nodes 负责编排。
+- 实现材料删除：删除原文件、SQLite material record 与对应 Chroma chunks。
+- 统一 Chroma 集成到 `langchain-chroma`，移除旧的 community vector-store fallback；损坏的本地索引仅保留为本地备份。
+- 新增 educator SQLite account persistence：注册信息、密码 hash、当前 educator 与课程归属会保存；login/register 不再是 mock 跳转。
+- 课程邀请改为 Telegram deep link：二维码和复制链接使用 `course_<course_id>` payload，新学生注册时会绑定对应课程。
+- 为 Telegram HTTP 调用加入连接重试，并固定从 `src/.env` 读取 bot 配置。
+
+### 设计决策
+- **LLM 建议、教师确认概念**：上传材料不自动覆盖课程结构，避免概念太细或提取错误。
+- **概念 ID 与显示名称分离**：mastery/history 应属于课程概念本身，而不是一个可编辑字符串。
+- **单个通用 Telegram bot**：课程差异由 invite payload 和 `course_id` 路由，而不是每门课维护一个 bot。
+- **本地运行数据不进入 Git**：上传文件与 Chroma backup 可重新生成或含课程内容，因此保持本地。
+
+### 已知限制
+- 当前 educator login 是单机 demo 的全局 active educator，不是 cookie/JWT session。
+- 当前一个 Telegram user 只能绑定一门课程；若要支持同一学生加入多门课，需要增加 `student_courses` enrollment 表，并将 mastery key 改为 `(user_id, course_id, concept_id)`。
+
+### 验证
+- Python 编译、SQLite concept rename persistence 测试、educator login persistence 测试和 Next.js lint 均通过。
+
+### 下一步
+- 实现 `student_courses`，使现有学生也能通过新邀请加入另一门课程。
+- 用 cookie/JWT 取代全局 `active_educator_id`，保护 educator API。
+- 为课程资料增加安全的重建索引入口。
+
+---
+
 ## 模板格式
 
 ```

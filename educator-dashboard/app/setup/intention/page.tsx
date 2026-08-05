@@ -95,7 +95,7 @@ export default function IntentionPage() {
           </div>
 
           <div className={styles.formActions} style={{ justifyContent: 'space-between' }}>
-            <button className="btn btn-secondary" onClick={() => router.push('/setup/upload')}>
+            <button className="btn btn-secondary" onClick={() => router.push('/setup/concepts')}>
               <ArrowLeft size={16} /> Back
             </button>
             <button id="nextToInviteBtn" className="btn btn-primary btn-lg" onClick={handleContinue} disabled={loading}>

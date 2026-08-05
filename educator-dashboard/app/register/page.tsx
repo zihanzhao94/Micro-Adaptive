@@ -4,6 +4,8 @@ import { useState } from 'react';
 import { GraduationCap, User, Mail, Building2, Lock, Eye, EyeOff, ArrowRight, Sparkles } from 'lucide-react';
 import styles from './auth.module.css';
 
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://127.0.0.1:8000';
+
 export default function RegisterPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [form, setForm] = useState({
@@ -13,13 +15,26 @@ export default function RegisterPage() {
     password: '',
   });
   const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    // Mock: simulate API call
-    await new Promise(r => setTimeout(r, 1200));
-    window.location.href = '/setup/course';
+    setMessage('');
+    try {
+      const response = await fetch(`${API_BASE}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      });
+      const body: { detail?: string } = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.detail ?? 'Could not create account.');
+      window.location.href = '/setup/course';
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Could not create account.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -53,6 +68,7 @@ export default function RegisterPage() {
           </div>
 
           <form onSubmit={handleSubmit} className={styles.form}>
+            {message && <div style={{ color: 'var(--danger)', fontSize: 13 }}>{message}</div>}
             <div className="form-group">
               <label className="form-label">Full Name</label>
               <div className={styles.inputWrapper}>

@@ -1,8 +1,11 @@
+import os
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import requests
+from dotenv import load_dotenv
 
 try:
     from . import course_rag
@@ -13,6 +16,7 @@ except ImportError:
 
 
 app = FastAPI(title="Micro-Adaptive API")
+load_dotenv(Path(__file__).resolve().parent / ".env")
 db.init_db()
 
 app.add_middleware(
@@ -29,14 +33,6 @@ app.add_middleware(
 MATERIALS_DIR = Path(__file__).resolve().parent.parent / "course_materials"
 ALLOWED_EXTENSIONS = {".txt", ".pdf"}
 
-COURSE_PROFILE = {
-    "name": "Course Workspace",
-    "code": "Course",
-    "year": "Current",
-    "educatorName": "Educator",
-    "educatorEmail": "",
-}
-
 TEACHING_INTENTION = {
     "week": "Current Week",
     "text": "",
@@ -51,7 +47,37 @@ class TeachingIntentionUpdate(BaseModel):
     difficulty: str = "medium"
 
 
-def _safe_material_path(filename: str) -> Path:
+class CourseUpdate(BaseModel):
+    name: str
+    code: str | None = None
+    description: str = ""
+    semester: str = "Current"
+    classSize: int | None = None
+    objectives: list[str] = []
+
+
+class CourseConceptInput(BaseModel):
+    id: str | None = None
+    name: str
+
+
+class CourseConceptsUpdate(BaseModel):
+    concepts: list[CourseConceptInput]
+
+
+class EducatorRegistration(BaseModel):
+    fullName: str
+    email: str
+    institution: str
+    password: str
+
+
+class EducatorLogin(BaseModel):
+    email: str
+    password: str
+
+
+def _safe_material_path(filename: str, course_id: str) -> Path:
     safe_name = Path(filename).name
     suffix = Path(safe_name).suffix.lower()
 
@@ -64,22 +90,11 @@ def _safe_material_path(filename: str) -> Path:
     if not safe_name:
         raise HTTPException(status_code=400, detail="Invalid filename.")
 
-    return MATERIALS_DIR / safe_name
+    return MATERIALS_DIR / course_id / safe_name
 
 
-def _list_materials() -> list[dict]:
-    MATERIALS_DIR.mkdir(exist_ok=True)
-    materials = []
-
-    for path in sorted(MATERIALS_DIR.iterdir()):
-        if path.is_file() and path.suffix.lower() in ALLOWED_EXTENSIONS:
-            materials.append({
-                "filename": path.name,
-                "type": path.suffix.lower().lstrip("."),
-                "size_bytes": path.stat().st_size,
-            })
-
-    return materials
+def _list_materials(course_id: str | None = None) -> list[dict]:
+    return db.list_materials(course_id)
 
 
 def _average_mastery(mastery: dict) -> int:
@@ -129,19 +144,25 @@ def _all_students() -> list[dict]:
 
 
 def _concept_mastery(students: list[dict]) -> list[dict]:
-    totals: dict[str, list[int]] = {}
+    confirmed_concepts = db.get_course_concepts()
+    totals: dict[str, list[int]] = {concept: [] for concept in confirmed_concepts}
     for student in students:
         for item in student["mastery"]:
-            totals.setdefault(item["concept"], []).append(item["score"])
+            concept = item["concept"]
+            # Once an educator has confirmed the course map, the dashboard must
+            # not surface old fallback concepts such as "course overview".
+            if confirmed_concepts and concept not in totals:
+                continue
+            totals.setdefault(concept, []).append(item["score"])
 
     return [
-        {"concept": concept, "avg": round(sum(scores) / len(scores))}
+        {"concept": concept, "avg": round(sum(scores) / len(scores)) if scores else 0}
         for concept, scores in totals.items()
     ]
 
 
 def _extract_intention_concepts(text: str) -> list[str]:
-    known_concepts = [item["concept"] for item in _concept_mastery(_all_students())]
+    known_concepts = db.get_course_concepts()
     return [
         concept for concept in known_concepts
         if concept.lower() in text.lower()
@@ -154,13 +175,115 @@ def health():
 
 
 @app.get("/materials")
-def list_materials():
-    return {"materials": _list_materials()}
+def list_materials(course_id: str | None = Query(default=None)):
+    return {"materials": _list_materials(course_id)}
 
 
 @app.get("/course")
 def get_course():
-    return {"course": COURSE_PROFILE}
+    return {"course": db.get_course()}
+
+
+@app.get("/auth/me")
+def get_current_educator():
+    return {"educator": db.get_active_educator()}
+
+
+@app.post("/auth/register")
+def register_educator(payload: EducatorRegistration):
+    try:
+        educator = db.register_educator(
+            payload.fullName, payload.email, payload.institution, payload.password,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"educator": educator}
+
+
+@app.post("/auth/login")
+def login_educator(payload: EducatorLogin):
+    educator = db.authenticate_educator(payload.email, payload.password)
+    if educator is None:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    return {"educator": educator}
+
+
+@app.post("/course")
+def save_course(payload: CourseUpdate):
+    course = db.save_course({
+        "name": payload.name,
+        "code": payload.code,
+        "description": payload.description,
+        "semester": payload.semester,
+        "class_size": payload.classSize,
+        "objectives": payload.objectives,
+    })
+    return {"course": course}
+
+
+@app.get("/course/invite")
+def get_course_invite():
+    token = os.getenv("BOT_TOKEN", "")
+    if not token:
+        raise HTTPException(status_code=500, detail="BOT_TOKEN is not configured.")
+
+    try:
+        response = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10)
+        bot_data = response.json()
+        username = bot_data.get("result", {}).get("username") if bot_data.get("ok") else None
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Could not reach Telegram to create the invite.") from exc
+
+    if not username:
+        raise HTTPException(status_code=502, detail="Telegram did not return a bot username.")
+
+    course = db.get_course()
+    payload = f"course_{course['course_id']}"
+    return {
+        "course_id": course["course_id"],
+        "course_name": course["name"],
+        "bot_username": username,
+        "link": f"https://t.me/{username}?start={payload}",
+    }
+
+
+@app.get("/course/concepts")
+def get_course_concepts(course_id: str | None = Query(default=None)):
+    active_course_id = course_id or db.get_active_course_id()
+    return {"course_id": active_course_id, "concepts": db.get_course_concept_records(active_course_id)}
+
+
+@app.post("/course/concepts")
+def save_course_concepts(
+    payload: CourseConceptsUpdate,
+    course_id: str | None = Query(default=None),
+):
+    active_course_id = course_id or db.get_active_course_id()
+    concepts = db.replace_course_concepts(
+        active_course_id,
+        [concept.model_dump() for concept in payload.concepts],
+    )
+    return {"course_id": active_course_id, "concepts": concepts}
+
+
+@app.post("/course/concepts/suggestions")
+def suggest_course_concepts(course_id: str | None = Query(default=None)):
+    active_course_id = course_id or db.get_active_course_id()
+    course = db.get_course(active_course_id)
+    materials = db.list_materials(active_course_id)
+    paths = [MATERIALS_DIR / active_course_id / item["filename"] for item in materials]
+    if not paths:
+        raise HTTPException(status_code=400, detail="Upload course materials before generating suggestions.")
+
+    try:
+        concepts = course_rag.suggest_course_concepts(
+            paths,
+            course["name"],
+            course.get("objectives", []),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not generate concept suggestions: {exc}") from exc
+    return {"course_id": active_course_id, "concepts": concepts}
 
 
 @app.get("/students")
@@ -229,13 +352,18 @@ def reindex_materials():
 
 
 @app.post("/materials/upload")
-async def upload_material(file: UploadFile = File(...)):
+async def upload_material(
+    file: UploadFile = File(...),
+    course_id: str | None = Query(default=None),
+):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename.")
 
-    # save the uploaded file to the course_materials directory
-    save_path = _safe_material_path(file.filename)
-    MATERIALS_DIR.mkdir(exist_ok=True)
+    active_course_id = course_id or db.get_active_course_id()
+
+    # save the uploaded file to this course's material directory
+    save_path = _safe_material_path(file.filename, active_course_id)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
 
     content = await file.read()
     if not content:
@@ -245,12 +373,44 @@ async def upload_material(file: UploadFile = File(...)):
 
     # Index the uploaded material for retrieval
     try:
-        course_rag.index_uploaded_material(save_path)
+        course_rag.index_uploaded_material(save_path, course_id=active_course_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Upload saved but indexing failed: {exc}") from exc
+
+    suffix = save_path.suffix.lower().lstrip(".")
+    db.record_material(active_course_id, save_path.name, suffix, save_path.stat().st_size, "indexed")
 
     return {
         "status": "uploaded",
         "filename": save_path.name,
-        "materials": _list_materials(),
+        "course_id": active_course_id,
+        "materials": _list_materials(active_course_id),
+    }
+
+
+@app.delete("/materials/{filename}")
+def delete_material(filename: str, course_id: str | None = Query(default=None)):
+    active_course_id = course_id or db.get_active_course_id()
+    safe_path = _safe_material_path(filename, active_course_id)
+    material = db.get_material(active_course_id, safe_path.name)
+    if material is None:
+        raise HTTPException(status_code=404, detail="Course material not found.")
+
+    try:
+        course_rag.remove_material_from_index(safe_path.name, active_course_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    try:
+        if safe_path.exists():
+            safe_path.unlink()
+        db.delete_material(active_course_id, safe_path.name)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not delete material file: {exc}") from exc
+
+    return {
+        "status": "deleted",
+        "filename": safe_path.name,
+        "course_id": active_course_id,
+        "materials": _list_materials(active_course_id),
     }

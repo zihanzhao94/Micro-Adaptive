@@ -10,6 +10,6 @@ requests>=2.32
 langgraph-cli[inmem]>=0.4
 langchain-text-splitters>=0.3
 langchain-community>=0.3
-chromadb
+langchain-chroma>=1.1,<2
 pypdf
 python-multipart>=0.0.9

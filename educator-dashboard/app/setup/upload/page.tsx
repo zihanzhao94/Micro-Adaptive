@@ -132,7 +132,22 @@ export default function UploadPage() {
     }
   };
 
-  const removeFile = (name: string) => setFiles(prev => prev.filter(f => f.name !== name));
+  const removeFile = async (name: string) => {
+    if (!window.confirm(`Delete ${name}? This removes its indexed course content too.`)) return;
+
+    setMessage('');
+    try {
+      const response = await fetch(`${API_BASE}/materials/${encodeURIComponent(name)}`, {
+        method: 'DELETE',
+      });
+      const body: { materials?: MaterialResponse[]; detail?: string } = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.detail ?? 'Could not delete material.');
+      setFiles((body.materials ?? []).map(materialToUploadedFile));
+      setMessage('Course material and indexed content deleted.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Could not delete material.');
+    }
+  };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
@@ -142,8 +157,7 @@ export default function UploadPage() {
 
   const handleContinue = async () => {
     setLoading(true);
-    await new Promise(r => setTimeout(r, 600));
-    router.push('/setup/intention');
+    router.push('/setup/concepts');
   };
 
   return (
@@ -241,7 +255,7 @@ export default function UploadPage() {
             <ArrowLeft size={16} /> Back
           </button>
           <button
-            id="nextToIntentionBtn"
+            id="nextToConceptsBtn"
             className="btn btn-primary btn-lg"
             onClick={handleContinue}
             disabled={loading || files.some(file => file.status === 'uploading')}

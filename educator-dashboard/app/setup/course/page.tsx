@@ -1,12 +1,15 @@
 'use client';
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { BookOpen, Tag, AlignLeft, ArrowRight, Calendar, Users, Target, Plus, X } from 'lucide-react';
+import { BookOpen, AlignLeft, ArrowRight, Calendar, Users, Target, Plus, X } from 'lucide-react';
 import styles from './step.module.css';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://127.0.0.1:8000';
 
 export default function CreateCoursePage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState('');
   const [form, setForm] = useState({
     name: '',
     description: '',
@@ -25,8 +28,32 @@ export default function CreateCoursePage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    await new Promise(r => setTimeout(r, 800));
-    router.push('/setup/upload');
+    setMessage('');
+
+    try {
+      const response = await fetch(`${API_BASE}/course`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: form.name,
+          description: form.description,
+          semester: form.semester,
+          classSize: form.classSize ? Number(form.classSize) : null,
+          objectives: objectives.filter(objective => objective.trim()),
+        }),
+      });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.detail ?? 'Could not create course.');
+      }
+
+      router.push('/setup/upload');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Could not create course.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -40,6 +67,11 @@ export default function CreateCoursePage() {
       </div>
 
       <div className="card">
+        {message && (
+          <div style={{ marginBottom: 16, color: 'var(--danger)', fontSize: 13 }}>
+            {message}
+          </div>
+        )}
         <form onSubmit={handleSubmit} className={styles.form}>
 
           {/* Course Name */}
