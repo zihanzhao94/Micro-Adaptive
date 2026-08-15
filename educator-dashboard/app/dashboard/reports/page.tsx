@@ -1,9 +1,16 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { ChevronDown, ChevronRight, CheckCircle, XCircle, Filter } from 'lucide-react';
 import styles from '../dashboard.module.css';
 import reportStyles from './reports.module.css';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://127.0.0.1:8000';
+
+type Course = {
+  code?: string;
+  name?: string;
+};
 
 const QUESTIONS = [
   {
@@ -53,13 +60,23 @@ function getRateColor(rate: number) {
 
 export default function ReportsPage() {
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [course, setCourse] = useState<Course | null>(null);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/course`)
+      .then(response => response.ok ? response.json() : null)
+      .then(body => setCourse(body?.course ?? null))
+      .catch(() => setCourse(null));
+  }, []);
+
+  const courseLabel = course?.code || course?.name || 'Current course';
 
   return (
     <>
       <div className={styles.topBar}>
         <div className={styles.topBarLeft}>
           <div className={styles.topBarGreeting}>Answer Reports</div>
-          <div className={styles.topBarDate}>Week 3 Quiz · CS5228 · 28 students</div>
+          <div className={styles.topBarDate}>Week 3 Quiz · {courseLabel} · 28 students</div>
         </div>
         <div className={styles.topBarRight}>
           <button id="filterBtn" className="btn btn-secondary btn-sm">

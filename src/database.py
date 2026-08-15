@@ -11,7 +11,7 @@ import hashlib
 import secrets
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 
@@ -34,9 +34,14 @@ LEGACY_DEFAULT_MASTERY = {
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # The bot and the API are separate processes on one file: WAL lets the
+    # dashboard read while the bot writes, and busy_timeout makes a concurrent
+    # write wait its turn instead of raising "database is locked".
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
@@ -186,7 +191,31 @@ def init_db():
         _add_column_if_missing(conn, "course_concepts", "concept_id", "TEXT")
         _add_column_if_missing(conn, "mastery", "concept_id", "TEXT")
         _add_column_if_missing(conn, "quiz_results", "concept_id", "TEXT")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reflections (
+                user_id INTEGER NOT NULL,
+                course_id TEXT NOT NULL,
+                week_no INTEGER NOT NULL,
+                concepts_json TEXT NOT NULL DEFAULT '[]',
+                confusion TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, course_id, week_no),
+                FOREIGN KEY (user_id) REFERENCES students(user_id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_reflections_course_week
+            ON reflections (course_id, week_no)
+        """)
+
         _add_column_if_missing(conn, "courses", "educator_id", "TEXT")
+        _add_column_if_missing(conn, "courses", "start_date", "TEXT")
+        _add_column_if_missing(conn, "courses", "total_weeks", "INTEGER")
+        _add_column_if_missing(conn, "courses", "push_weekday", "INTEGER")
+        _add_column_if_missing(conn, "courses", "push_time", "TEXT")
+        _add_column_if_missing(conn, "courses", "push_enabled", "INTEGER NOT NULL DEFAULT 0")
+        _add_column_if_missing(conn, "course_materials", "week_no", "INTEGER")
         conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_course_concepts_course_concept_id
             ON course_concepts (course_id, concept_id)
@@ -354,6 +383,25 @@ def _course_id_from_name(name: str) -> str:
     return cleaned[:48] or DEFAULT_COURSE_ID
 
 
+def _clean_or_keep(data: dict, key: str, fallback):
+    if key not in data:
+        return fallback
+    value = (data.get(key) or "").strip()
+    return value or None
+
+
+def _int_or_keep(data: dict, key: str, fallback):
+    if key not in data:
+        return fallback
+    value = data.get(key)
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def save_course(data: dict) -> dict:
     init_db()
     now = datetime.now().isoformat()
@@ -367,13 +415,25 @@ def save_course(data: dict) -> dict:
     active_educator = get_active_educator()
     educator_id = data.get("educator_id") or (active_educator or {}).get("id")
 
+    existing = get_course(course_id) if course_exists(course_id) else {}
+    # Schedule fields are optional on every save — a caller that omits them
+    # (e.g. the setup wizard) must not wipe what the educator already configured.
+    start_date = _clean_or_keep(data, "start_date", existing.get("startDate"))
+    total_weeks = _int_or_keep(data, "total_weeks", existing.get("totalWeeks"))
+    push_weekday = _int_or_keep(data, "push_weekday", existing.get("pushWeekday"))
+    push_time = _clean_or_keep(data, "push_time", existing.get("pushTime"))
+    push_enabled = data.get("push_enabled")
+    if push_enabled is None:
+        push_enabled = existing.get("pushEnabled", False)
+
     with _connect() as conn:
         conn.execute("""
             INSERT INTO courses (
                 course_id, name, code, description, semester, class_size,
-                objectives_json, educator_id, created_at, updated_at
+                objectives_json, educator_id, start_date, total_weeks,
+                push_weekday, push_time, push_enabled, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(course_id) DO UPDATE SET
                 name = excluded.name,
                 code = excluded.code,
@@ -382,6 +442,11 @@ def save_course(data: dict) -> dict:
                 class_size = excluded.class_size,
                 objectives_json = excluded.objectives_json,
                 educator_id = excluded.educator_id,
+                start_date = excluded.start_date,
+                total_weeks = excluded.total_weeks,
+                push_weekday = excluded.push_weekday,
+                push_time = excluded.push_time,
+                push_enabled = excluded.push_enabled,
                 updated_at = excluded.updated_at
         """, (
             course_id,
@@ -392,6 +457,11 @@ def save_course(data: dict) -> dict:
             int(class_size) if str(class_size or "").strip().isdigit() else None,
             json.dumps(objectives),
             educator_id,
+            start_date,
+            total_weeks,
+            push_weekday,
+            push_time,
+            1 if push_enabled else 0,
             now,
             now,
         ))
@@ -434,6 +504,11 @@ def get_course(course_id: str | None = None) -> dict:
         "objectives": objectives,
         "educatorName": row["educator_name"] or (get_active_educator() or {}).get("name", "Educator"),
         "educatorEmail": row["educator_email"] or (get_active_educator() or {}).get("email", ""),
+        "startDate": row["start_date"],
+        "totalWeeks": row["total_weeks"],
+        "pushWeekday": row["push_weekday"],
+        "pushTime": row["push_time"],
+        "pushEnabled": bool(row["push_enabled"]),
     }
 
 
@@ -444,33 +519,401 @@ def course_exists(course_id: str) -> bool:
     return row is not None
 
 
-def record_material(course_id: str, filename: str, file_type: str, size_bytes: int, status: str = "indexed") -> None:
+DEFAULT_PUSH_TIME = "13:00"
+
+
+def _parse_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _parse_time(value: str | None) -> time:
+    try:
+        hour, minute = str(value or DEFAULT_PUSH_TIME).split(":")[:2]
+        return time(int(hour), int(minute))
+    except (TypeError, ValueError):
+        return time(13, 0)
+
+
+def current_week_no(course_id: str | None = None, today: date | None = None) -> int | None:
+    """Which teaching week we are in, or None if the course isn't running.
+
+    None covers three cases the caller must not push in: no start date set,
+    the course hasn't started yet, and the semester is already over.
+    """
+    course = get_course(course_id)
+    start = _parse_date(course.get("startDate"))
+    if start is None:
+        return None
+
+    days = ((today or date.today()) - start).days
+    if days < 0:
+        return None
+
+    week = days // 7 + 1
+    total_weeks = course.get("totalWeeks")
+    if total_weeks and week > int(total_weeks):
+        return None
+    return week
+
+
+def week_push_datetime(course_id: str | None = None, week_no: int | None = None) -> datetime | None:
+    """The moment week `week_no`'s push is scheduled for."""
+    course = get_course(course_id)
+    start = _parse_date(course.get("startDate"))
+    if start is None or not week_no:
+        return None
+
+    week_start = start + timedelta(days=(week_no - 1) * 7)
+    weekday = course.get("pushWeekday")
+    weekday = week_start.weekday() if weekday is None else int(weekday) % 7
+    push_day = week_start + timedelta(days=(weekday - week_start.weekday()) % 7)
+    return datetime.combine(push_day, _parse_time(course.get("pushTime")))
+
+
+def get_last_pushed_slot(course_id: str | None = None) -> str | None:
+    init_db()
+    course_id = course_id or get_active_course_id()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (f"last_pushed_slot:{course_id}",),
+        ).fetchone()
+    return row["value"] if row else None
+
+
+def set_last_pushed_slot(course_id: str, scheduled: datetime, week_no: int) -> None:
+    """Record the slot just sent, plus its week.
+
+    The week is stored rather than recomputed later: a digest that fires after
+    the final teaching week would otherwise fail to resolve one.
+    """
+    init_db()
+    with _connect() as conn:
+        conn.executemany("""
+            INSERT INTO app_state (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """, [
+            (f"last_pushed_slot:{course_id}", scheduled.isoformat()),
+            (f"last_pushed_week:{course_id}", str(week_no)),
+        ])
+        _clear_send_now(conn, course_id, "push")
+
+
+def request_send_now(course_id: str, kind: str) -> None:
+    """Arm a manual send ('push' or 'digest'), picked up on the bot's next tick.
+
+    A flag rather than a direct send: the bot is a separate process, so the API
+    can only leave something for it to find.
+    """
+    init_db()
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO app_state (key, value) VALUES (?, '1')
+            ON CONFLICT(key) DO UPDATE SET value = '1'
+        """, (f"send_now_{kind}:{course_id}",))
+
+
+def _clear_send_now(conn: sqlite3.Connection, course_id: str, kind: str) -> None:
+    conn.execute("DELETE FROM app_state WHERE key = ?", (f"send_now_{kind}:{course_id}",))
+
+
+def due_push(course_id: str | None = None, now: datetime | None = None) -> tuple[int, datetime] | None:
+    """The (week, scheduled time) to push right now, or None if nothing is due.
+
+    Idempotency is keyed on the scheduled moment rather than the week number, so
+    the bot's ~30s loop never re-sends the same slot, but moving the push time
+    within a week arms a new one.
+    """
+    course_id = course_id or get_active_course_id()
+    course = get_course(course_id)
+    if not course.get("pushEnabled"):
+        return None
+
+    now = now or datetime.now()
+
+    # A manual "send now" bypasses the schedule but still goes through the same
+    # claim, so it can't double-send either.
+    if _get_state(f"send_now_push:{course_id}") == "1":
+        return current_week_no(course_id, today=now.date()) or 1, now.replace(microsecond=0)
+
+    week = current_week_no(course_id, today=now.date())
+    if week is None:
+        return None
+
+    scheduled = week_push_datetime(course_id, week)
+    if scheduled is None or now < scheduled:
+        return None
+    if get_last_pushed_slot(course_id) == scheduled.isoformat():
+        return None
+    return week, scheduled
+
+
+# ── Weekly reflections ────────────────────────────────────────────────────────
+
+def get_reflection(user_id: int, course_id: str, week_no: int) -> dict | None:
+    init_db()
+    with _connect() as conn:
+        row = conn.execute("""
+            SELECT * FROM reflections
+            WHERE user_id = ? AND course_id = ? AND week_no = ?
+        """, (user_id, course_id, week_no)).fetchone()
+    if row is None:
+        return None
+    return {
+        "user_id": row["user_id"],
+        "week_no": row["week_no"],
+        "concepts": json.loads(row["concepts_json"] or "[]"),
+        "confusion": row["confusion"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def toggle_reflection_concept(user_id: int, course_id: str, week_no: int, concept: str) -> list[str]:
+    """Add or remove one concept from a student's weekly pick. Returns the new list.
+
+    Selections live in the database rather than in memory so a bot restart in the
+    middle of a reflection doesn't lose what the student already tapped.
+    """
+    init_db()
+    now = datetime.now().isoformat()
+    existing = get_reflection(user_id, course_id, week_no)
+    concepts = list(existing["concepts"]) if existing else []
+
+    if concept in concepts:
+        concepts.remove(concept)
+    else:
+        concepts.append(concept)
+
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO reflections (user_id, course_id, week_no, concepts_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, course_id, week_no) DO UPDATE SET
+                concepts_json = excluded.concepts_json,
+                updated_at = excluded.updated_at
+        """, (user_id, course_id, week_no, json.dumps(concepts), now, now))
+    return concepts
+
+
+def set_reflection_confusion(user_id: int, course_id: str, week_no: int, confusion: str | None) -> None:
+    init_db()
+    now = datetime.now().isoformat()
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO reflections (user_id, course_id, week_no, confusion, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, course_id, week_no) DO UPDATE SET
+                confusion = excluded.confusion,
+                updated_at = excluded.updated_at
+        """, (user_id, course_id, week_no, confusion, now, now))
+
+
+def list_reflections(course_id: str | None = None, week_no: int | None = None) -> list[dict]:
+    """Every student's reflection, newest first — the educator-facing view."""
+    init_db()
+    course_id = course_id or get_active_course_id()
+    query = """
+        SELECT r.*, students.name AS student_name
+        FROM reflections r
+        LEFT JOIN students ON students.user_id = r.user_id
+        WHERE r.course_id = ?
+    """
+    params: list = [course_id]
+    if week_no is not None:
+        query += " AND r.week_no = ?"
+        params.append(week_no)
+    query += " ORDER BY r.week_no DESC, r.updated_at DESC"
+
+    with _connect() as conn:
+        rows = conn.execute(query, params).fetchall()
+
+    return [{
+        "user_id": row["user_id"],
+        "studentName": row["student_name"] or f"Student {row['user_id']}",
+        "week": row["week_no"],
+        "concepts": json.loads(row["concepts_json"] or "[]"),
+        "confusion": row["confusion"],
+        "updatedAt": row["updated_at"],
+    } for row in rows]
+
+
+def get_week_concepts(course_id: str, week_no: int) -> list[str] | None:
+    """Cached concept list for one teaching week (None when not computed yet)."""
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (f"week_concepts:{course_id}:{week_no}",),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        return json.loads(row["value"])
+    except json.JSONDecodeError:
+        return None
+
+
+def set_week_concepts(course_id: str, week_no: int, concepts: list[str]) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO app_state (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """, (f"week_concepts:{course_id}:{week_no}", json.dumps(concepts)))
+
+
+DIGEST_DELAY_HOURS = 24
+
+
+def get_week_note(course_id: str, week_no: int) -> str:
+    """The educator's optional one-liner appended to the class digest."""
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (f"week_note:{course_id}:{week_no}",),
+        ).fetchone()
+    return row["value"] if row else ""
+
+
+def set_week_note(course_id: str, week_no: int, note: str) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO app_state (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """, (f"week_note:{course_id}:{week_no}", note.strip()))
+
+
+def _get_state(key: str) -> str | None:
+    init_db()
+    with _connect() as conn:
+        row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_last_digest_slot(course_id: str, scheduled: datetime) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO app_state (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """, (f"last_digest_slot:{course_id}", scheduled.isoformat()))
+        _clear_send_now(conn, course_id, "digest")
+
+
+def get_last_pushed_week(course_id: str | None = None) -> int | None:
+    course_id = course_id or get_active_course_id()
+    try:
+        return int(_get_state(f"last_pushed_week:{course_id}"))
+    except (TypeError, ValueError):
+        return None
+
+
+def clear_last_digest_slot(course_id: str) -> None:
+    """Release a claimed digest slot so it can be retried.
+
+    Used when there was nothing to summarise: the slot is claimed before sending
+    to stop double-sends, and without this an empty week would burn it forever.
+    """
+    init_db()
+    with _connect() as conn:
+        conn.execute("DELETE FROM app_state WHERE key = ?", (f"last_digest_slot:{course_id}",))
+
+
+def due_digest(course_id: str | None = None, now: datetime | None = None) -> tuple[int, datetime] | None:
+    """The (week, original push slot) whose class digest is now due.
+
+    Fires a fixed delay after the weekly push rather than waiting for everyone to
+    answer — response rates never reach 100%, so a "wait for all" trigger would
+    never fire at all.
+    """
+    course_id = course_id or get_active_course_id()
+    if not get_course(course_id).get("pushEnabled"):
+        return None
+
+    pushed = get_last_pushed_slot(course_id)
+    if not pushed:
+        return None
+
+    # Checked before the already-sent guard so the dashboard's "send digest now"
+    # can re-send one for a push whose digest already went out.
+    forced = _get_state(f"send_now_digest:{course_id}") == "1"
+    if not forced and _get_state(f"last_digest_slot:{course_id}") == pushed:
+        return None
+
+    try:
+        slot = datetime.fromisoformat(pushed)
+    except ValueError:
+        return None
+
+    now = now or datetime.now()
+    if not forced and now < slot + timedelta(hours=DIGEST_DELAY_HOURS):
+        return None
+
+    stored_week = _get_state(f"last_pushed_week:{course_id}")
+    try:
+        return int(stored_week), slot
+    except (TypeError, ValueError):
+        return None
+
+
+def record_material(
+    course_id: str,
+    filename: str,
+    file_type: str,
+    size_bytes: int,
+    status: str = "indexed",
+    week_no: int | None = None,
+) -> None:
     init_db()
     now = datetime.now().isoformat()
     with _connect() as conn:
         conn.execute("""
             INSERT INTO course_materials (
-                course_id, filename, type, size_bytes, status, created_at, updated_at
+                course_id, filename, type, size_bytes, status, week_no, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(course_id, filename) DO UPDATE SET
                 type = excluded.type,
                 size_bytes = excluded.size_bytes,
                 status = excluded.status,
+                week_no = COALESCE(excluded.week_no, course_materials.week_no),
                 updated_at = excluded.updated_at
-        """, (course_id, filename, file_type, size_bytes, status, now, now))
+        """, (course_id, filename, file_type, size_bytes, status, week_no, now, now))
 
 
-def list_materials(course_id: str | None = None) -> list[dict]:
+def set_material_week(course_id: str, filename: str, week_no: int | None) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute("""
+            UPDATE course_materials
+            SET week_no = ?, updated_at = ?
+            WHERE course_id = ? AND filename = ?
+        """, (week_no, datetime.now().isoformat(), course_id, filename))
+
+
+def list_materials(course_id: str | None = None, week_no: int | None = None) -> list[dict]:
     init_db()
     course_id = course_id or get_active_course_id()
+    query = """
+        SELECT filename, type, size_bytes, status, week_no, created_at, updated_at
+        FROM course_materials
+        WHERE course_id = ?
+    """
+    params: list = [course_id]
+    if week_no is not None:
+        query += " AND week_no = ?"
+        params.append(week_no)
+    query += " ORDER BY updated_at DESC, filename"
+
     with _connect() as conn:
-        rows = conn.execute("""
-            SELECT filename, type, size_bytes, status, created_at, updated_at
-            FROM course_materials
-            WHERE course_id = ?
-            ORDER BY updated_at DESC, filename
-        """, (course_id,)).fetchall()
+        rows = conn.execute(query, params).fetchall()
 
     return [dict(row) for row in rows]
 
@@ -479,7 +922,7 @@ def get_material(course_id: str, filename: str) -> dict | None:
     init_db()
     with _connect() as conn:
         row = conn.execute("""
-            SELECT filename, type, size_bytes, status, created_at, updated_at
+            SELECT filename, type, size_bytes, status, week_no, created_at, updated_at
             FROM course_materials
             WHERE course_id = ? AND filename = ?
         """, (course_id, filename)).fetchone()

@@ -4,41 +4,6 @@
 
 ---
 
-## 2026-08-05 — Course-scoped Adaptive Learning Workflow
-
-### 做了什么
-- 将课程、上传材料和 RAG retrieval 按 `course_id` 隔离；教师上传的 PDF/TXT 保存到 `course_materials/<course_id>/`，并在 Chroma metadata 中保存课程 ID。
-- 新增教师确认课程概念的流程：LLM 可根据课程资料和 learning objectives 提供建议，但只有教师保存后才成为正式 concept map。
-- 为 concept 增加稳定 `concept_id`；教师在 dashboard 改名后，既有 mastery 和 quiz history 仍显示新名称并保留分数。
-- 新增 dashboard 的 `Course Concepts` 页面，可在 setup 后继续维护概念。
-- 将 agent 的选题改为优先使用教师确认的 concept map；新学生不会再依赖旧的 ML hardcoded concepts。
-- 将 quiz、coding task、diagram prompt 的生成与开放题评价提取到 `skills.py`，由 LangGraph nodes 负责编排。
-- 实现材料删除：删除原文件、SQLite material record 与对应 Chroma chunks。
-- 统一 Chroma 集成到 `langchain-chroma`，移除旧的 community vector-store fallback；损坏的本地索引仅保留为本地备份。
-- 新增 educator SQLite account persistence：注册信息、密码 hash、当前 educator 与课程归属会保存；login/register 不再是 mock 跳转。
-- 课程邀请改为 Telegram deep link：二维码和复制链接使用 `course_<course_id>` payload，新学生注册时会绑定对应课程。
-- 为 Telegram HTTP 调用加入连接重试，并固定从 `src/.env` 读取 bot 配置。
-
-### 设计决策
-- **LLM 建议、教师确认概念**：上传材料不自动覆盖课程结构，避免概念太细或提取错误。
-- **概念 ID 与显示名称分离**：mastery/history 应属于课程概念本身，而不是一个可编辑字符串。
-- **单个通用 Telegram bot**：课程差异由 invite payload 和 `course_id` 路由，而不是每门课维护一个 bot。
-- **本地运行数据不进入 Git**：上传文件与 Chroma backup 可重新生成或含课程内容，因此保持本地。
-
-### 已知限制
-- 当前 educator login 是单机 demo 的全局 active educator，不是 cookie/JWT session。
-- 当前一个 Telegram user 只能绑定一门课程；若要支持同一学生加入多门课，需要增加 `student_courses` enrollment 表，并将 mastery key 改为 `(user_id, course_id, concept_id)`。
-
-### 验证
-- Python 编译、SQLite concept rename persistence 测试、educator login persistence 测试和 Next.js lint 均通过。
-
-### 下一步
-- 实现 `student_courses`，使现有学生也能通过新邀请加入另一门课程。
-- 用 cookie/JWT 取代全局 `active_educator_id`，保护 educator API。
-- 为课程资料增加安全的重建索引入口。
-
----
-
 ## 模板格式
 
 ```
@@ -370,3 +335,98 @@ generate_activity
 - 视测试结果决定是否将 `quiz_results` 重命名为更准确的 `activity_results`。
 
 ---
+
+## 2026-08-05 — Course-scoped Adaptive Learning Workflow
+
+### 做了什么
+- 将课程、上传材料和 RAG retrieval 按 `course_id` 隔离；教师上传的 PDF/TXT 保存到 `course_materials/<course_id>/`，并在 Chroma metadata 中保存课程 ID。
+- 新增教师确认课程概念的流程：LLM 可根据课程资料和 learning objectives 提供建议，但只有教师保存后才成为正式 concept map。
+- 为 concept 增加稳定 `concept_id`；教师在 dashboard 改名后，既有 mastery 和 quiz history 仍显示新名称并保留分数。
+- 新增 dashboard 的 `Course Concepts` 页面，可在 setup 后继续维护概念。
+- 将 agent 的选题改为优先使用教师确认的 concept map；新学生不会再依赖旧的 ML hardcoded concepts。
+- 将 quiz、coding task、diagram prompt 的生成与开放题评价提取到 `skills.py`，由 LangGraph nodes 负责编排。
+- 实现材料删除：删除原文件、SQLite material record 与对应 Chroma chunks。
+- 统一 Chroma 集成到 `langchain-chroma`，移除旧的 community vector-store fallback；损坏的本地索引仅保留为本地备份。
+- 新增 educator SQLite account persistence：注册信息、密码 hash、当前 educator 与课程归属会保存；login/register 不再是 mock 跳转。
+- 课程邀请改为 Telegram deep link：二维码和复制链接使用 `course_<course_id>` payload，新学生注册时会绑定对应课程。
+- 为 Telegram HTTP 调用加入连接重试，并固定从 `src/.env` 读取 bot 配置。
+
+### 设计决策
+- **LLM 建议、教师确认概念**：上传材料不自动覆盖课程结构，避免概念太细或提取错误。
+- **概念 ID 与显示名称分离**：mastery/history 应属于课程概念本身，而不是一个可编辑字符串。
+- **单个通用 Telegram bot**：课程差异由 invite payload 和 `course_id` 路由，而不是每门课维护一个 bot。
+- **本地运行数据不进入 Git**：上传文件与 Chroma backup 可重新生成或含课程内容，因此保持本地。
+
+### 已知限制
+- 当前 educator login 是单机 demo 的全局 active educator，不是 cookie/JWT session。
+- 当前一个 Telegram user 只能绑定一门课程；若要支持同一学生加入多门课，需要增加 `student_courses` enrollment 表，并将 mastery key 改为 `(user_id, course_id, concept_id)`。
+
+### 验证
+- Python 编译、SQLite concept rename persistence 测试、educator login persistence 测试和 Next.js lint 均通过。
+
+### 下一步
+- 实现 `student_courses`，使现有学生也能通过新邀请加入另一门课程。
+- 用 cookie/JWT 取代全局 `active_educator_id`，保护 educator API。
+- 为课程资料增加安全的重建索引入口。
+
+---
+
+## 2026-08-15 — 每周反思推送（方向调整）
+
+### 背景
+导师建议把方向从「自适应出题」转向「学习反思」，并要求系统能主动找学生、和每周课程绑定、老师能看到学生怎么用。
+
+核心问题是：**学生凭什么会主动用？**
+
+参考的是教育学里的 minute paper（下课前问「今天最重要的三个概念是什么」「哪里还不懂」）。它有效的前提是人还在教室、只花两分钟、写两行字。搬到课外自愿参与后这三条都没了，所以这次的设计重点不是功能多，而是**让学生花的力气尽量小、拿到的回报看得见**。
+
+### 主要改动
+
+**1. 课程按周组织**
+- 课程加了开课日期、总周数、推送星期和时间；材料加了周次，上传时必须选。
+- 周次是**算出来的**（`(今天 - 开课日) // 7 + 1`），没有单独建周次表 —— 课表规律时不需要。
+- dashboard 加了 Weekly Push 设置页，setup 流程多了一步。
+
+**2. 定时推送**
+- bot 里加了一条独立线程，每 2 秒检查一次该不该发。没放在原来的消息轮询里，因为那里会卡最多 30 秒。
+- 群发用单独线程 + 限速 20 条/秒，200 人广播期间学生照样能正常聊天。
+- 靠「这个时间点发过没」防重复。改了推送时间就是新的时间点，会重新发。
+
+**3. 学生端：点按代替打字**
+- 推送出来是**本周概念的按钮，点最多 3 个**，十秒能答完。第二问「哪里不清楚」可选，有 Skip。
+- 概念从当周材料自动提取，每周算一次并缓存。
+- 答完给一句**缺口反馈**：「本周还讲了 X，值得回看」。
+- 困惑**不当场解答**，要点「Explain it now」才解释 —— 否则「下节课老师会讲」这个最强的动力就没了。
+
+**4. 班级汇总**
+- 推送 24 小时后自动发：大家都选了什么、最多人卡在哪、「你不是一个人」。
+- 触发条件是固定 24 小时，不是「所有人都回复」—— 回复率现实上到不了 100%。
+- 文案不替老师承诺「会讲」。老师可以自己加一句，不加也照发。
+
+**5. 老师端**
+- 新增 Reflections 页面：概念票数条形图 + 困惑原文列表。
+- **票数为 0 的概念也显示** —— 「讲了但没人记住」是最有价值的信号。
+- 加了 Send now 按钮，方便测试和临时补发。
+
+**6. 其他**
+- SQLite 开了 WAL，解决老师刷页面和 bot 写消息互相阻塞的问题。
+- 新建 `reflections.py`，把反思相关逻辑从 `bot.py` 和 `agent.py` 里收拢起来。
+
+### 踩的坑
+- **汇总发不出去**：代码是「先记账、再发送」。没人填反思时发送被跳过，但账已经记了，之后永远不再发。改成没内容时把账划掉。
+- **手动按钮没反应**：判断顺序错了，先检查「发过没」就直接返回，根本没看到按钮的标记。
+- **学期最后一天推送后汇总丢失**：汇总原本从推送时间反推周次，跨天后算出「学期已结束」。改成推送时直接把周次存下来。
+
+### 几个想清楚了的决定
+- **周次算不存**：课表规律时建表是为不存在的需求做设计。
+- **防重复用「时间点」不用「周次」**：这样改时间能重新触发，同时不会重复发。
+- **反思单独建表**，没混进聊天记录 —— 它是「概念列表 + 困惑 + 每周唯一」的结构化数据，混进流水账后老师端根本统计不出来。
+- **推送开关要留着**：它是唯一「暂停发消息但保留配置」的入口，学期中想停一周不该靠清空开课日期。
+
+### 待办
+- **期末复习包**：用学生 13 周的记录生成 —— 从没选过的概念（盲区）、没解决的困惑（这时候可以直接给答案）、盲区练习题。这是让学生坚持一整个学期的理由。现有的 quiz/mastery 代码在这里正好有用武之地。
+- 汇总里加「另外 N 位同学也提到了这点」，降低承认不懂的心理压力。
+- **隐私要分层**：反思是学生知道要给老师看的，自由提问不是。现在混在一张表里，老师端如果全都展示，学生就不会再诚实说「我不懂」了。
+- 推送时间建议设在下课后半小时到一小时，别放晚上。
+- **学生入口比代码重要**：老师第一节课放个二维码说一句话，和不说，注册率差一个数量级。
+- 已知限制（写进报告）：学生的请求之间仍然会互相排队；会话状态存在内存里，bot 重启会丢。

@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { Upload, FileText, X, Plus, RefreshCw, AlertCircle } from 'lucide-react';
+import { Upload, FileText, X, RefreshCw, AlertCircle } from 'lucide-react';
 import styles from '../dashboard.module.css';
 import matStyles from './materials.module.css';
 
@@ -13,6 +13,7 @@ interface MaterialResponse {
   size_bytes: number;
   status?: 'indexed' | 'processing' | 'error';
   updated_at?: string;
+  week_no?: number | null;
 }
 
 interface FileItem {
@@ -22,7 +23,13 @@ interface FileItem {
   type: 'pdf' | 'txt';
   uploadedAt: string;
   status: 'indexed' | 'processing' | 'error';
+  week: number | null;
   error?: string;
+}
+
+interface CourseConcept {
+  id: string;
+  name: string;
 }
 
 function formatSize(size: number) {
@@ -42,7 +49,23 @@ function materialToFileItem(material: MaterialResponse): FileItem {
     type: material.type,
     uploadedAt: material.updated_at ? new Date(material.updated_at).toLocaleString() : 'Saved',
     status: material.status ?? 'indexed',
+    week: material.week_no ?? null,
   };
+}
+
+// Week 1 first, unscheduled material last.
+function byWeek(a: FileItem, b: FileItem) {
+  return (a.week ?? Infinity) - (b.week ?? Infinity) || a.name.localeCompare(b.name);
+}
+
+function groupByWeek(files: FileItem[]): { week: number | null; files: FileItem[] }[] {
+  const groups = new Map<number | null, FileItem[]>();
+  for (const file of [...files].sort(byWeek)) {
+    const bucket = groups.get(file.week);
+    if (bucket) bucket.push(file);
+    else groups.set(file.week, [file]);
+  }
+  return [...groups].map(([week, files]) => ({ week, files }));
 }
 
 export default function MaterialsPage() {
@@ -50,7 +73,12 @@ export default function MaterialsPage() {
   const [dragging, setDragging] = useState(false);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
+  const [uploadWeek, setUploadWeek] = useState<string>('');
+  const [totalWeeks, setTotalWeeks] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Week choices come from the course's teaching weeks, set on the Weekly Push page.
+  const weekOptions = Array.from({ length: totalWeeks ?? 0 }, (_, i) => i + 1);
 
   const removeFile = async (file: FileItem) => {
     if (!window.confirm(`Delete ${file.name}? This removes its indexed course content too.`)) return;
@@ -84,13 +112,67 @@ export default function MaterialsPage() {
     }
   };
 
+  const loadTotalWeeks = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/course`);
+      if (!response.ok) return;
+      const { course } = await response.json();
+      setTotalWeeks(course.totalWeeks ?? null);
+    } catch {
+      // Week tagging just stays unavailable if the course can't be read.
+    }
+  };
+
   useEffect(() => {
     loadMaterials();
+    loadTotalWeeks();
   }, []);
+
+  const refreshConceptSuggestions = async () => {
+    const conceptsResponse = await fetch(`${API_BASE}/course/concepts`);
+    const conceptsBody: { concepts?: CourseConcept[]; detail?: string } = await conceptsResponse.json().catch(() => ({}));
+    if (!conceptsResponse.ok) throw new Error(conceptsBody.detail ?? 'Could not load current concepts.');
+
+    const suggestionResponse = await fetch(`${API_BASE}/course/concepts/suggestions`, { method: 'POST' });
+    const suggestionBody: { concepts?: string[]; detail?: string } = await suggestionResponse.json().catch(() => ({}));
+    if (!suggestionResponse.ok) throw new Error(suggestionBody.detail ?? 'Could not generate concept suggestions.');
+
+    const currentConcepts = conceptsBody.concepts ?? [];
+    const existing = new Set(currentConcepts.map(concept => concept.name.trim().toLowerCase()));
+    const additions = (suggestionBody.concepts ?? [])
+      .map(name => name.trim())
+      .filter(name => name && !existing.has(name.toLowerCase()));
+
+    if (additions.length === 0) return 0;
+
+    const mergedConcepts = [
+      ...currentConcepts,
+      ...additions.map(name => ({ id: '', name })),
+    ];
+
+    const saveResponse = await fetch(`${API_BASE}/course/concepts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ concepts: mergedConcepts }),
+    });
+    const saveBody: { detail?: string } = await saveResponse.json().catch(() => ({}));
+    if (!saveResponse.ok) throw new Error(saveBody.detail ?? 'Could not save concept suggestions.');
+
+    return additions.length;
+  };
 
   const uploadFile = async (file: File) => {
     const suffix = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`;
     const type = getFileType(file.name);
+
+    if (!uploadWeek) {
+      setMessage(
+        totalWeeks
+          ? 'Pick the teaching week this material belongs to before uploading.'
+          : 'Set the number of teaching weeks on the Weekly Push page before uploading materials.'
+      );
+      return;
+    }
 
     if (!ACCEPTED_EXTENSIONS.includes(suffix)) {
       setFiles(prev => [...prev, {
@@ -100,6 +182,7 @@ export default function MaterialsPage() {
         type,
         uploadedAt: 'Just now',
         status: 'error',
+        week: null,
         error: 'Only PDF and TXT files are supported.',
       }]);
       return;
@@ -112,11 +195,13 @@ export default function MaterialsPage() {
       type,
       uploadedAt: 'Just now',
       status: 'processing',
+      week: uploadWeek ? Number(uploadWeek) : null,
     };
     setFiles(prev => [...prev, newFile]);
 
     const formData = new FormData();
     formData.append('file', file);
+    if (uploadWeek) formData.append('week', uploadWeek);
 
     try {
       const response = await fetch(`${API_BASE}/materials/upload`, {
@@ -137,7 +222,20 @@ export default function MaterialsPage() {
           item.id === newFile.id ? { ...item, status: 'indexed' } : item
         )));
       }
-      setMessage('Material uploaded and indexed.');
+      try {
+        const addedConcepts = await refreshConceptSuggestions();
+        setMessage(
+          addedConcepts > 0
+            ? `Material uploaded and indexed. Added ${addedConcepts} suggested concepts. Review them in Course Concepts.`
+            : 'Material uploaded and indexed. Course concepts are already up to date.'
+        );
+      } catch (conceptError) {
+        setMessage(
+          `Material uploaded and indexed. Concept suggestions were not updated: ${
+            conceptError instanceof Error ? conceptError.message : 'unknown error'
+          }`
+        );
+      }
     } catch (error) {
       setFiles(prev => prev.map(item => (
         item.id === newFile.id
@@ -156,17 +254,12 @@ export default function MaterialsPage() {
           <div className={styles.topBarGreeting}>Course Materials</div>
           <div className={styles.topBarDate}>{indexedCount}/{files.length} files indexed</div>
         </div>
-        <div className={styles.topBarRight}>
-          <button id="uploadMaterialBtn" className="btn btn-primary btn-sm" onClick={() => inputRef.current?.click()}>
-            <Plus size={14} /> Upload File
-          </button>
-          <input ref={inputRef} type="file" accept=".pdf,.txt" multiple style={{ display: 'none' }}
-            onChange={e => {
-              Array.from(e.target.files ?? []).forEach(uploadFile);
-              e.currentTarget.value = '';
-            }}
-          />
-        </div>
+        <input ref={inputRef} type="file" accept=".pdf,.txt" multiple style={{ display: 'none' }}
+          onChange={e => {
+            Array.from(e.target.files ?? []).forEach(uploadFile);
+            e.currentTarget.value = '';
+          }}
+        />
       </div>
 
       <div className={styles.pageContent}>
@@ -196,7 +289,31 @@ export default function MaterialsPage() {
           onClick={() => inputRef.current?.click()}
         >
           <Upload size={22} className={matStyles.dropIcon} />
-          <span className={matStyles.dropText}>Drop PDF or TXT files here, or click to upload</span>
+          <span className={matStyles.dropText}>
+            {uploadWeek
+              ? `Drop PDF or TXT files here to add them to Week ${uploadWeek}`
+              : 'Drop PDF or TXT files here, or click to upload'}
+          </span>
+
+          {/* Sits inside the drop zone so the week is chosen before the files are picked. */}
+          <label
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px' }}
+            onClick={e => e.stopPropagation()}
+          >
+            Upload to
+            <select
+              id="uploadWeek"
+              className="form-input"
+              style={{ padding: '5px 10px', fontSize: '12px', width: 'auto' }}
+              value={uploadWeek}
+              onChange={e => setUploadWeek(e.target.value)}
+              disabled={!totalWeeks}
+            >
+              <option value="">{totalWeeks ? 'Select week…' : 'Set teaching weeks first'}</option>
+              {weekOptions.map(w => <option key={w} value={w}>Week {w}</option>)}
+            </select>
+          </label>
+
           <div style={{ display: 'flex', gap: '8px' }}>
             <span className="badge badge-danger"><FileText size={10} /> PDF</span>
             <span className="badge badge-success"><FileText size={10} /> TXT</span>
@@ -223,7 +340,15 @@ export default function MaterialsPage() {
               <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Loading materials...</span>
             </div>
           )}
-          {files.map(file => (
+          {groupByWeek(files).map(group => (
+            <div key={group.week ?? 'unscheduled'}>
+              <div className={matStyles.weekHeader}>
+                <span>{group.week === null ? 'Unscheduled' : `Week ${group.week}`}</span>
+                <span className={matStyles.weekCount}>
+                  {group.files.length} {group.files.length === 1 ? 'file' : 'files'}
+                </span>
+              </div>
+              {group.files.map(file => (
             <div key={file.id} className={matStyles.tableRow}>
               <div className={matStyles.fileNameCell}>
                 <div className={`${matStyles.fileTypeIcon} ${file.type === 'pdf' ? matStyles.pdf : matStyles.txt}`}>
@@ -259,7 +384,16 @@ export default function MaterialsPage() {
                 <X size={14} />
               </button>
             </div>
+              ))}
+            </div>
           ))}
+          {!loading && files.length === 0 && (
+            <div className={matStyles.tableRow}>
+              <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                No materials yet. Pick a week above, then upload.
+              </span>
+            </div>
+          )}
         </div>
       </div>
     </>

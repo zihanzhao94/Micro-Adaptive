@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import random
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ from urllib3.util.retry import Retry
 
 import database as db
 import agent
+import reflections
 from langgraph.types import Command
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -37,6 +39,7 @@ if not TOKEN:
     raise SystemExit("BOT_TOKEN not set in .env")
 
 BASE = f"https://api.telegram.org/bot{TOKEN}"
+DASHBOARD_BASE_URL = os.getenv("DASHBOARD_BASE_URL", "http://localhost:3000").rstrip("/")
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -70,6 +73,7 @@ STATES = {
     "WAIT_STYLE":  "wait_style",
     "WAIT_ACTIVITY_SUBMISSION": "wait_activity_submission",
     "IN_SOCRATIC": "in_socratic",   # waiting for student's Socratic reply
+    "WAIT_REFLECTION_CONFUSION": "wait_reflection_confusion",
 }
 
 INTEREST_OPTIONS = [
@@ -163,7 +167,8 @@ def inline_kb(rows: list[list[tuple]]) -> dict:
 def action_menu_markup() -> dict:
     return inline_kb([
         [("Start adaptive activity", "menu_learn")],
-        [("Take a quiz", "menu_quiz"), ("View progress", "menu_progress")],
+        [("Take a quiz", "menu_quiz"), ("Coding task", "menu_coding")],
+        [("Diagram task", "menu_diagram"), ("View progress", "menu_progress")],
         [("Memory", "menu_memory"), ("History", "menu_history")],
     ])
 
@@ -182,6 +187,17 @@ def append_next_steps(text: str) -> str:
         "Next: use /learn for another adaptive activity, /progress to check mastery, "
         "or ask me any course question."
     )
+
+
+def dashboard_student_url(user_id: int) -> str:
+    return f"{DASHBOARD_BASE_URL}/dashboard/student/{user_id}"
+
+
+def course_display_name(course_id: str | None) -> str:
+    course = db.get_course(course_id) if course_id else db.get_course()
+    code = course.get("code") or course.get("course_id") or "Course"
+    name = course.get("name") or code
+    return f"{code} — {name}" if name != code else code
 
 
 def is_capability_question(text: str) -> bool:
@@ -221,10 +237,21 @@ def handle_start(user_id: int, chat_id: int, first_name: str, course_id: str | N
     """/start: welcome returning users; start onboarding (ask name) for new ones."""
     student = db.get_student(user_id)
     if student and student.get("registered"):
+        if course_id:
+            if not db.course_exists(course_id):
+                send(chat_id, "This course invite is no longer valid. Please ask your educator for a new link.")
+                return
+            if student.get("course_id") != course_id:
+                db.save_student(user_id, {"course_id": course_id})
+                student = db.get_student(user_id) or student
+
+        course_name = course_display_name(student.get("course_id"))
         send(chat_id,
              f"👋 Welcome back, *{student['name']}*!\n\n"
+             f"Course: *{course_name}*\n"
              f"Use /learn to start an adaptive activity, or ask me anything about the course.\n"
-             f"Type /progress to see your mastery.")
+             f"Type /progress to see your mastery.\n\n"
+             f"Educator dashboard: {dashboard_student_url(user_id)}")
         send_action_menu(chat_id)
         SESSIONS[user_id] = {"state": STATES["IDLE"], "data": {}}
         return
@@ -391,6 +418,8 @@ def handle_help(chat_id: int):
          "• /start — Register or welcome\n"
          "• /learn — Start an adaptive learning activity\n"
          "• /quiz — Start a quiz activity\n"
+         "• /learn coding — Test a coding task\n"
+         "• /learn diagram — Test a diagram task\n"
          "• /progress — View your mastery\n"
          "• /memory — View remembered conversation context\n"
          "• /history — View recent saved conversation messages\n"
@@ -408,6 +437,10 @@ def handle_menu_callback(user_id: int, chat_id: int, msg_id: int,
         handle_learning_activity(user_id, chat_id)
     elif data == "menu_quiz":
         handle_quiz(user_id, chat_id)
+    elif data == "menu_coding":
+        handle_learning_activity(user_id, chat_id, forced_activity_type="coding_task")
+    elif data == "menu_diagram":
+        handle_learning_activity(user_id, chat_id, forced_activity_type="diagram_prompt")
     elif data == "menu_progress":
         handle_progress(user_id, chat_id)
     elif data == "menu_memory":
@@ -551,12 +584,16 @@ def handle_style_callback(user_id: int, chat_id: int, msg_id: int,
     })
 
     SESSIONS[user_id] = {"state": STATES["IDLE"], "data": {}}
+    course_id = sdata.get("course_id", db.get_active_course_id())
+    course_name = course_display_name(course_id)
 
     edit(chat_id, msg_id,
          f"🎉 *You're all set, {name}!*\n\n"
          f"📌 *Your Profile:*\n"
+         f"• Course: {course_name}\n"
          f"• Interests: {interests_str}\n"
          f"• Learning Style: {style_label}\n\n"
+         f"Educator dashboard: {dashboard_student_url(user_id)}\n\n"
          f"Here's what you can do:\n"
          f"• /learn — Start an adaptive learning activity\n"
          f"• /quiz — Start a quiz activity\n"
@@ -588,6 +625,23 @@ def handle_text(user_id: int, chat_id: int, text: str):
              f"*What are your interests?* (Select all that apply)\n"
              f"The AI uses these to personalise explanations and analogies for you.",
              reply_markup=inline_kb(rows))
+        return
+
+    # ── Weekly reflection: the optional "what's still unclear" answer ─────────
+    if state == STATES["WAIT_REFLECTION_CONFUSION"]:
+        week = session.get("reflection_week")
+        SESSIONS[user_id]["state"] = STATES["IDLE"]
+        SESSIONS[user_id].pop("reflection_week", None)
+        if week is None:
+            send(chat_id, "That reflection expired, but thanks — ask me anything about the course.")
+            return
+
+        course_id = db.get_student_course_id(user_id)
+        db.set_reflection_confusion(user_id, course_id, week, text.strip())
+        send(chat_id,
+             "Got it ✅ This goes to your instructor with the rest of the class's "
+             "answers, so they know what to revisit.",
+             reply_markup=inline_kb([[("Explain it now", f"reflexplain_{week}_x")]]))
         return
 
     # ── Open activity submission: coding_task / diagram_prompt ────────────────
@@ -731,6 +785,12 @@ def process_update(update: dict):
             handle_interest_callback(user_id, chat_id, msg_id, cb_id, data)
         elif data.startswith("style_"):
             handle_style_callback(user_id, chat_id, msg_id, cb_id, data)
+        elif data.startswith("reflskip_"):
+            handle_reflection_skip(user_id, chat_id, msg_id, cb_id, data)
+        elif data.startswith("reflexplain_"):
+            handle_reflection_explain(user_id, chat_id, msg_id, cb_id, data)
+        elif data.startswith("refl_"):
+            handle_reflection_callback(user_id, chat_id, msg_id, cb_id, data)
         elif data.startswith("menu_"):
             handle_menu_callback(user_id, chat_id, msg_id, cb_id, data)
         return
@@ -773,10 +833,238 @@ def process_update(update: dict):
         handle_text(user_id, chat_id, text)
 
 
+WEEKLY_REFLECTION_TEMPLATE = (
+    "📚 *Week {week} reflection*\n\n"
+    "Which concepts mattered most this week? Tap up to {max_picks} — "
+    "it takes about ten seconds."
+)
+
+MAX_REFLECTION_PICKS = reflections.MAX_PICKS
+
+
+def reflection_keyboard(week: int, concepts: list[str], selected: list[str]) -> dict:
+    """Concept buttons plus Done. Callback data carries the index, not the name,
+    because Telegram caps callback_data at 64 bytes."""
+    rows = [
+        [(f"{'✓ ' if concept in selected else ''}{concept}", f"refl_{week}_c{i}")]
+        for i, concept in enumerate(concepts)
+    ]
+    rows.append([(f"✅ Done ({len(selected)}/{MAX_REFLECTION_PICKS})", f"refl_{week}_done")])
+    return inline_kb(rows)
+
+
+def handle_reflection_callback(user_id: int, chat_id: int, msg_id: int,
+                               callback_id: str, data: str):
+    """Concept taps and Done for the weekly reflection.
+
+    Picks are written straight to the database on every tap, so the flow
+    survives a bot restart mid-reflection.
+    """
+    # data looks like refl_<week>_c<index> or refl_<week>_done
+    _, week_part, action = data.split("_", 2)
+    week = int(week_part)
+    course_id = db.get_student_course_id(user_id)
+    concepts = reflections.week_concepts(course_id, week)
+
+    if action.startswith("c"):
+        concept = concepts[int(action[1:])]
+        current = (db.get_reflection(user_id, course_id, week) or {}).get("concepts", [])
+        if concept not in current and len(current) >= MAX_REFLECTION_PICKS:
+            answer_callback(callback_id, f"Pick at most {MAX_REFLECTION_PICKS}. Tap one to unselect.", show_alert=True)
+            return
+
+        selected = db.toggle_reflection_concept(user_id, course_id, week, concept)
+        answer_callback(callback_id)
+        edit(chat_id, msg_id,
+             WEEKLY_REFLECTION_TEMPLATE.format(week=week, max_picks=MAX_REFLECTION_PICKS),
+             reply_markup=reflection_keyboard(week, concepts, selected))
+        return
+
+    # ── Done: give the gap feedback, then ask the optional confusion ──────────
+    selected = (db.get_reflection(user_id, course_id, week) or {}).get("concepts", [])
+    if not selected:
+        answer_callback(callback_id, "Tap at least one concept first.", show_alert=True)
+        return
+    answer_callback(callback_id)
+
+    missed = [c for c in concepts if c not in selected]
+    lines = [f"✅ Noted for week {week}: *{', '.join(selected)}*"]
+    if missed:
+        # The whole point of picking: show what the week covered that they left out.
+        lines.append(f"This week also covered *{', '.join(missed[:3])}* — worth a second look.")
+    edit(chat_id, msg_id, "\n\n".join(lines))
+
+    SESSIONS.setdefault(user_id, {"data": {}})
+    SESSIONS[user_id]["state"] = STATES["WAIT_REFLECTION_CONFUSION"]
+    SESSIONS[user_id]["reflection_week"] = week
+    send(chat_id,
+         "Anything still unclear? Type it below — your instructor sees it, and it "
+         "helps them decide what to revisit.",
+         reply_markup=inline_kb([[("Skip", f"reflskip_{week}_x")]]))
+
+
+def handle_reflection_skip(user_id: int, chat_id: int, msg_id: int, callback_id: str, data: str):
+    answer_callback(callback_id)
+    SESSIONS.setdefault(user_id, {})["state"] = STATES["IDLE"]
+    SESSIONS[user_id].pop("reflection_week", None)
+    edit(chat_id, msg_id, "No problem — thanks for reflecting this week! 🙌")
+
+
+def handle_reflection_explain(user_id: int, chat_id: int, msg_id: int, callback_id: str, data: str):
+    """Optional on-demand explanation, kept behind a tap so the bot doesn't
+    pre-empt the instructor addressing the confusion in class."""
+    answer_callback(callback_id)
+    week = int(data.split("_")[1])
+    course_id = db.get_student_course_id(user_id)
+    confusion = (db.get_reflection(user_id, course_id, week) or {}).get("confusion")
+    if not confusion:
+        edit(chat_id, msg_id, "Nothing to explain yet.")
+        return
+
+    typing(chat_id)
+    student = db.get_student(user_id) or {}
+    response = agent.answer(confusion, student, db.get_conversation_summary(user_id), [])
+    send(chat_id, response)
+
+
+# Telegram throttles bulk sends at roughly 30 messages/second; stay under it.
+PUSH_RATE_PER_SECOND = 20
+_push_thread: threading.Thread | None = None
+
+
+def _broadcast_weekly_push(week: int, scheduled):
+    """Fan the weekly prompt out to every student. Runs off the polling thread."""
+    course_id = db.get_active_course_id()
+    concepts = reflections.week_concepts(course_id, week)
+    if not concepts:
+        log.warning("Week %s push skipped: no concepts to offer.", week)
+        return
+
+    text = WEEKLY_REFLECTION_TEMPLATE.format(week=week, max_picks=MAX_REFLECTION_PICKS)
+    keyboard = reflection_keyboard(week, concepts, [])
+    students = db.list_students()
+    sent = 0
+
+    for user_id, _student in students:
+        try:
+            # In private chats chat_id == user_id. Seed CHAT_USERS so send() can
+            # log the message — on a cold start nothing has populated it yet.
+            CHAT_USERS.setdefault(user_id, user_id)
+            response = send(user_id, text, reply_markup=keyboard)
+            if response.get("ok"):
+                sent += 1
+            else:
+                log.warning("Weekly push to %s failed: %s", user_id, response.get("description"))
+        except Exception as e:
+            log.error(f"Weekly push to {user_id} failed: {e}", exc_info=True)
+        time.sleep(1 / PUSH_RATE_PER_SECOND)
+
+    log.info("📤 Week %s reflection (%s) sent to %s/%s student(s).",
+             week, scheduled, sent, len(students))
+
+
+def _broadcast_weekly_digest(week: int, slot):
+    course_id = db.get_active_course_id()
+    text = reflections.build_digest_text(course_id, week)
+    if text is None:
+        # Give the slot back — nothing was sent, so a later reply should still
+        # be able to produce this week's digest.
+        db.clear_last_digest_slot(course_id)
+        log.info("Week %s digest skipped: no reflections came in yet.", week)
+        return
+
+    sent = 0
+    for user_id, _student in db.list_students():
+        try:
+            CHAT_USERS.setdefault(user_id, user_id)
+            if send(user_id, text).get("ok"):
+                sent += 1
+        except Exception as e:
+            log.error(f"Digest to {user_id} failed: {e}", exc_info=True)
+        time.sleep(1 / PUSH_RATE_PER_SECOND)
+
+    log.info("📊 Week %s digest sent to %s student(s).", week, sent)
+
+
+def maybe_run_weekly_digest():
+    """Send the class digest a fixed delay after the weekly push."""
+    global _push_thread
+
+    if _push_thread and _push_thread.is_alive():
+        return
+
+    course_id = db.get_active_course_id()
+    due = db.due_digest(course_id)
+    if due is None:
+        return
+
+    week, slot = due
+    # Claim before sending, same as the push: the next tick arrives mid-broadcast.
+    db.set_last_digest_slot(course_id, slot)
+
+    _push_thread = threading.Thread(
+        target=_broadcast_weekly_digest, args=(week, slot), name="weekly-digest", daemon=True,
+    )
+    _push_thread.start()
+
+
+def maybe_run_weekly_push():
+    """Start this week's reflection push once, if it's due.
+
+    Called on every polling tick (~30s). db.due_push() keeps a slot from being
+    sent twice; the send itself runs on a worker thread so a large class doesn't
+    stall message handling for everyone else.
+    """
+    global _push_thread
+
+    if _push_thread and _push_thread.is_alive():
+        return
+
+    course_id = db.get_active_course_id()
+    due = db.due_push(course_id)
+    if due is None:
+        return
+
+    week, scheduled = due
+    # Claim the slot before sending: the next tick may arrive while the
+    # broadcast is still running, and must not start a second one.
+    db.set_last_pushed_slot(course_id, scheduled, week)
+
+    _push_thread = threading.Thread(
+        target=_broadcast_weekly_push,
+        args=(week, scheduled),
+        name="weekly-push",
+        daemon=True,
+    )
+    _push_thread.start()
+
+
+SCHEDULER_INTERVAL_SECONDS = 10
+
+
+def run_scheduler():
+    """Watch for due pushes on their own clock.
+
+    Kept off the polling loop because getUpdates blocks for up to 30s: a manual
+    "send now" would otherwise wait for that long poll to return.
+    """
+    while True:
+        try:
+            maybe_run_weekly_push()
+            maybe_run_weekly_digest()
+        except Exception as e:
+            # A scheduling bug must never take down message handling.
+            log.error(f"Scheduled push check failed: {e}", exc_info=True)
+        time.sleep(SCHEDULER_INTERVAL_SECONDS)
+
+
 def main():
     """Long-polling loop: repeatedly ask Telegram for new updates and process them."""
     log.info("🤖 Micro-Adaptive Bot starting (long polling)...")
     offset = 0
+
+    threading.Thread(target=run_scheduler, name="scheduler", daemon=True).start()
+    log.info("⏰ Scheduler running (checks every %ss).", SCHEDULER_INTERVAL_SECONDS)
 
     while True:
         #TODO: consider switching to webhook mode for production (faster, more reliable)

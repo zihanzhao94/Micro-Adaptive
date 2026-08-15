@@ -48,7 +48,7 @@ export default function CreateCoursePage() {
         throw new Error(body?.detail ?? 'Could not create course.');
       }
 
-      router.push('/setup/upload');
+      router.push('/setup/schedule');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Could not create course.');
     } finally {
@@ -186,7 +186,7 @@ export default function CreateCoursePage() {
 
           <div className={styles.formActions}>
             <button
-              id="nextToUploadBtn"
+              id="nextToScheduleBtn"
               type="submit"
               className="btn btn-primary btn-lg"
               disabled={loading}

@@ -46,6 +46,8 @@ export default function UploadPage() {
   const [loading, setLoading] = useState(false);
   const [loadingMaterials, setLoadingMaterials] = useState(true);
   const [message, setMessage] = useState('');
+  const [uploadWeek, setUploadWeek] = useState('');
+  const [totalWeeks, setTotalWeeks] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -68,7 +70,19 @@ export default function UploadPage() {
       }
     }
 
+    async function loadTotalWeeks() {
+      try {
+        const response = await fetch(`${API_BASE}/course`);
+        if (!response.ok) return;
+        const { course } = await response.json();
+        if (!cancelled) setTotalWeeks(course.totalWeeks ?? null);
+      } catch {
+        // Falls back to the "set teaching weeks first" hint.
+      }
+    }
+
     loadMaterials();
+    loadTotalWeeks();
 
     return () => {
       cancelled = true;
@@ -90,6 +104,11 @@ export default function UploadPage() {
       return;
     }
 
+    if (!uploadWeek) {
+      setMessage('Pick the teaching week this material belongs to before uploading.');
+      return;
+    }
+
     setMessage('');
     setFiles(prev => [...prev, {
       name: file.name,
@@ -100,6 +119,7 @@ export default function UploadPage() {
 
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('week', uploadWeek);
 
     try {
       const response = await fetch(`${API_BASE}/materials/upload`, {
@@ -171,6 +191,22 @@ export default function UploadPage() {
       </div>
 
       <div className="card">
+        <div className="form-group">
+          <label className="form-label" htmlFor="uploadWeek">Teaching week</label>
+          <select
+            id="uploadWeek"
+            className="form-input"
+            value={uploadWeek}
+            onChange={e => setUploadWeek(e.target.value)}
+            disabled={!totalWeeks}
+          >
+            <option value="">{totalWeeks ? 'Select week…' : 'Set teaching weeks first'}</option>
+            {Array.from({ length: totalWeeks ?? 0 }, (_, i) => i + 1).map(w => (
+              <option key={w} value={w}>Week {w}</option>
+            ))}
+          </select>
+        </div>
+
         <div
           className={`${styles.uploadZone} ${dragging ? styles.uploadZoneDragging : ''}`}
           onDragOver={e => { e.preventDefault(); setDragging(true); }}
@@ -251,7 +287,7 @@ export default function UploadPage() {
         )}
 
         <div className={styles.formActions} style={{ marginTop: '24px', justifyContent: 'space-between' }}>
-          <button className="btn btn-secondary" onClick={() => router.push('/setup/course')}>
+          <button className="btn btn-secondary" onClick={() => router.push('/setup/schedule')}>
             <ArrowLeft size={16} /> Back
           </button>
           <button

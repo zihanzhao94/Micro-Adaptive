@@ -114,7 +114,7 @@ def summarize_conversation(
     ).content
     return raw_output.strip()[:2_000]
 
-# state type for the graph 
+# state type for the graph
 class State(MessagesState):
     # Only learning_style is required as input; other fields are set by nodes
     learning_style: str                  # required: "analogy" / "socratic" / "direct"
@@ -210,9 +210,9 @@ def choose_activity(state: State) -> dict:
 
     Return ONLY valid JSON in this exact shape:
     {
-        "activity_type": "quiz",
-        "activity_reason": "Brief reason for the choice",
-        "difficulty": "medium"
+        "activity_type": "xxx",  # one of: quiz, coding_task, diagram_prompt
+        "activity_reason": "xxx",  # brief rationale for the choice
+        "difficulty": "xxx"  # one of: easy, medium, hard
     }
     """
     raw_output = llm.invoke(

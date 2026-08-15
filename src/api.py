@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
@@ -54,6 +54,19 @@ class CourseUpdate(BaseModel):
     semester: str = "Current"
     classSize: int | None = None
     objectives: list[str] = []
+    startDate: str | None = None
+    totalWeeks: int | None = None
+    pushWeekday: int | None = None
+    pushTime: str | None = None
+    pushEnabled: bool | None = None
+
+
+class MaterialWeekUpdate(BaseModel):
+    week: int | None = None
+
+
+class WeekNoteUpdate(BaseModel):
+    note: str = ""
 
 
 class CourseConceptInput(BaseModel):
@@ -210,15 +223,28 @@ def login_educator(payload: EducatorLogin):
 
 @app.post("/course")
 def save_course(payload: CourseUpdate):
-    course = db.save_course({
+    data = {
         "name": payload.name,
         "code": payload.code,
         "description": payload.description,
         "semester": payload.semester,
         "class_size": payload.classSize,
         "objectives": payload.objectives,
-    })
-    return {"course": course}
+    }
+    # Only forward schedule fields the client actually sent, so the setup wizard
+    # (which knows nothing about pushes) can't clear them on save.
+    sent = payload.model_fields_set
+    for field, column in (
+        ("startDate", "start_date"),
+        ("totalWeeks", "total_weeks"),
+        ("pushWeekday", "push_weekday"),
+        ("pushTime", "push_time"),
+        ("pushEnabled", "push_enabled"),
+    ):
+        if field in sent:
+            data[column] = getattr(payload, field)
+
+    return {"course": db.save_course(data)}
 
 
 @app.get("/course/invite")
@@ -284,6 +310,96 @@ def suggest_course_concepts(course_id: str | None = Query(default=None)):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Could not generate concept suggestions: {exc}") from exc
     return {"course_id": active_course_id, "concepts": concepts}
+
+
+@app.post("/schedule/send-now")
+def send_now(kind: str = Query(...), course_id: str | None = Query(default=None)):
+    """Queue a manual send. The bot picks it up on its next poll (~30s)."""
+    if kind not in {"push", "digest"}:
+        raise HTTPException(status_code=400, detail="kind must be 'push' or 'digest'.")
+
+    active_course_id = course_id or db.get_active_course_id()
+    course = db.get_course(active_course_id)
+    if not course.get("pushEnabled"):
+        raise HTTPException(status_code=400, detail="Enable weekly push before sending.")
+    if kind == "digest":
+        if not db.get_last_pushed_slot(active_course_id):
+            raise HTTPException(status_code=400, detail="Send the weekly push first — a digest summarises its replies.")
+        # There is nothing to summarise until someone answers, and sending an
+        # empty digest would just be noise.
+        week = db.get_last_pushed_week(active_course_id)
+        if not db.list_reflections(active_course_id, week_no=week):
+            raise HTTPException(
+                status_code=400,
+                detail=f"No one has answered week {week} yet — there is nothing to summarise.",
+            )
+
+    db.request_send_now(active_course_id, kind)
+    return {"status": "queued", "kind": kind, "students": len(db.list_students())}
+
+
+@app.get("/reflections")
+def get_reflections(
+    week: int | None = Query(default=None),
+    course_id: str | None = Query(default=None),
+):
+    """One week's reflections, aggregated for the educator.
+
+    Concepts the week offered but nobody picked are included with a count of 0 —
+    those are exactly the ones that did not land.
+    """
+    active_course_id = course_id or db.get_active_course_id()
+    all_reflections = db.list_reflections(active_course_id)
+    available_weeks = sorted({item["week"] for item in all_reflections}, reverse=True)
+
+    current_week = week if week is not None else (available_weeks[0] if available_weeks else None)
+    if current_week is None:
+        return {
+            "week": None,
+            "availableWeeks": [],
+            "respondedCount": 0,
+            "totalStudents": len(db.list_students()),
+            "concepts": [],
+            "confusions": [],
+        }
+
+    reflections = [item for item in all_reflections if item["week"] == current_week]
+
+    counts: dict[str, int] = {name: 0 for name in (db.get_week_concepts(active_course_id, current_week) or [])}
+    for item in reflections:
+        for concept in item["concepts"]:
+            counts[concept] = counts.get(concept, 0) + 1
+
+    return {
+        "week": current_week,
+        "availableWeeks": available_weeks,
+        "respondedCount": len(reflections),
+        "totalStudents": len(db.list_students()),
+        "concepts": [
+            {"name": name, "count": count}
+            for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        ],
+        "confusions": [
+            {
+                "studentName": item["studentName"],
+                "text": item["confusion"],
+                "updatedAt": item["updatedAt"],
+            }
+            for item in reflections if (item["confusion"] or "").strip()
+        ],
+        "note": db.get_week_note(active_course_id, current_week),
+    }
+
+
+@app.put("/reflections/{week}/note")
+def update_week_note(
+    week: int,
+    payload: WeekNoteUpdate,
+    course_id: str | None = Query(default=None),
+):
+    active_course_id = course_id or db.get_active_course_id()
+    db.set_week_note(active_course_id, week, payload.note)
+    return {"week": week, "note": db.get_week_note(active_course_id, week)}
 
 
 @app.get("/students")
@@ -354,6 +470,7 @@ def reindex_materials():
 @app.post("/materials/upload")
 async def upload_material(
     file: UploadFile = File(...),
+    week: int | None = Form(default=None),
     course_id: str | None = Query(default=None),
 ):
     if not file.filename:
@@ -378,12 +495,33 @@ async def upload_material(
         raise HTTPException(status_code=500, detail=f"Upload saved but indexing failed: {exc}") from exc
 
     suffix = save_path.suffix.lower().lstrip(".")
-    db.record_material(active_course_id, save_path.name, suffix, save_path.stat().st_size, "indexed")
+    db.record_material(
+        active_course_id, save_path.name, suffix, save_path.stat().st_size, "indexed", week_no=week
+    )
 
     return {
         "status": "uploaded",
         "filename": save_path.name,
         "course_id": active_course_id,
+        "materials": _list_materials(active_course_id),
+    }
+
+
+@app.patch("/materials/{filename}/week")
+def update_material_week(
+    filename: str,
+    payload: MaterialWeekUpdate,
+    course_id: str | None = Query(default=None),
+):
+    active_course_id = course_id or db.get_active_course_id()
+    safe_path = _safe_material_path(filename, active_course_id)
+    if db.get_material(active_course_id, safe_path.name) is None:
+        raise HTTPException(status_code=404, detail="Course material not found.")
+
+    db.set_material_week(active_course_id, safe_path.name, payload.week)
+    return {
+        "status": "updated",
+        "filename": safe_path.name,
         "materials": _list_materials(active_course_id),
     }
 

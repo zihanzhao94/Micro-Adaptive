@@ -254,7 +254,10 @@ def query_rag(query: str, course_id: str = "default") -> str:
     index = get_index()
     if index is None:
         return ""
-    retrieved_docs = retrieve(query, index, course_id=course_id)
+    try:
+        retrieved_docs = retrieve(query, index, course_id=course_id)
+    except Exception:
+        return ""
     return format_context(retrieved_docs)
 
 

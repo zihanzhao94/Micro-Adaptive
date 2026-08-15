@@ -26,7 +26,7 @@
 /* Table */
 .tableHeader {
   display: grid;
-  grid-template-columns: 2fr 80px 120px 110px 80px 40px;
+  grid-template-columns: 2fr 80px 120px 110px 40px;
   gap: 12px;
   padding: 12px 20px;
   font-size: 10px;
@@ -39,7 +39,7 @@
 
 .tableRow {
   display: grid;
-  grid-template-columns: 2fr 80px 120px 110px 80px 40px;
+  grid-template-columns: 2fr 80px 120px 110px 40px;
   gap: 12px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--border);
@@ -49,6 +49,27 @@
 
 .tableRow:last-child { border-bottom: none; }
 .tableRow:hover { background: var(--bg-elevated); }
+
+.weekHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary, var(--text-muted));
+}
+
+.weekCount {
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-muted);
+}
 
 .fileNameCell {
   display: flex;

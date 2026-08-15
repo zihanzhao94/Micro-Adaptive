@@ -20,17 +20,19 @@ src/.env
 # LangGraph API cache
 .langgraph_api/
 
-# Vector database cache
+# Vector database cache, plus any local backup/corrupt snapshots of it
 chroma_db/
 src/chroma_db/
-chroma_db.backup-*/
+chroma_db.*/
 
 # Educator-uploaded materials stay local; root sample files may remain tracked.
 course_materials/*/
 
-# Local SQLite database
+# Local SQLite database (WAL mode adds -wal / -shm sidecar files)
 micro_adaptive.db
+micro_adaptive.db-*
 src/micro_adaptive.db
+src/micro_adaptive.db-*
 
 # cached file
 past demo/
