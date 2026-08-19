@@ -27,11 +27,6 @@ interface FileItem {
   error?: string;
 }
 
-interface CourseConcept {
-  id: string;
-  name: string;
-}
-
 function formatSize(size: number) {
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(0)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
@@ -128,37 +123,14 @@ export default function MaterialsPage() {
     loadTotalWeeks();
   }, []);
 
-  const refreshConceptSuggestions = async () => {
-    const conceptsResponse = await fetch(`${API_BASE}/course/concepts`);
-    const conceptsBody: { concepts?: CourseConcept[]; detail?: string } = await conceptsResponse.json().catch(() => ({}));
-    if (!conceptsResponse.ok) throw new Error(conceptsBody.detail ?? 'Could not load current concepts.');
-
-    const suggestionResponse = await fetch(`${API_BASE}/course/concepts/suggestions`, { method: 'POST' });
-    const suggestionBody: { concepts?: string[]; detail?: string } = await suggestionResponse.json().catch(() => ({}));
-    if (!suggestionResponse.ok) throw new Error(suggestionBody.detail ?? 'Could not generate concept suggestions.');
-
-    const currentConcepts = conceptsBody.concepts ?? [];
-    const existing = new Set(currentConcepts.map(concept => concept.name.trim().toLowerCase()));
-    const additions = (suggestionBody.concepts ?? [])
-      .map(name => name.trim())
-      .filter(name => name && !existing.has(name.toLowerCase()));
-
-    if (additions.length === 0) return 0;
-
-    const mergedConcepts = [
-      ...currentConcepts,
-      ...additions.map(name => ({ id: '', name })),
-    ];
-
-    const saveResponse = await fetch(`${API_BASE}/course/concepts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ concepts: mergedConcepts }),
-    });
-    const saveBody: { detail?: string } = await saveResponse.json().catch(() => ({}));
-    if (!saveResponse.ok) throw new Error(saveBody.detail ?? 'Could not save concept suggestions.');
-
-    return additions.length;
+  /** Extract the week's concepts and link them, so the upload immediately
+   *  gives that week's reflection something to ask about. */
+  const extractWeekConcepts = async (week: string) => {
+    const response = await fetch(`${API_BASE}/course/concepts/extract-week?week=${week}`, { method: 'POST' });
+    const body: { linked?: string[]; created?: string[]; detail?: string } =
+      await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.detail ?? 'Could not derive concepts for this week.');
+    return { linked: body.linked ?? [], created: body.created ?? [] };
   };
 
   const uploadFile = async (file: File) => {
@@ -223,15 +195,14 @@ export default function MaterialsPage() {
         )));
       }
       try {
-        const addedConcepts = await refreshConceptSuggestions();
+        const { linked, created } = await extractWeekConcepts(uploadWeek);
+        const newPart = created.length ? ` ${created.length} new concept(s) added — review them in Course Concepts.` : '';
         setMessage(
-          addedConcepts > 0
-            ? `Material uploaded and indexed. Added ${addedConcepts} suggested concepts. Review them in Course Concepts.`
-            : 'Material uploaded and indexed. Course concepts are already up to date.'
+          `Uploaded and indexed. Week ${uploadWeek} now covers ${linked.length} concept(s).${newPart}`
         );
       } catch (conceptError) {
         setMessage(
-          `Material uploaded and indexed. Concept suggestions were not updated: ${
+          `Uploaded and indexed, but week ${uploadWeek}'s concepts were not updated: ${
             conceptError instanceof Error ? conceptError.message : 'unknown error'
           }`
         );

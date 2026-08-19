@@ -12,12 +12,21 @@ type ConceptMastery = {
   avg: number;
 };
 
+type WeekMastery = {
+  week: number;
+  isCurrent: boolean;
+  avg: number;
+  concepts: ConceptMastery[];
+};
+
 type DashboardSummary = {
   totalStudents: number;
   classAvgMastery: number;
   activeThisWeek: number;
   weakestConcept: ConceptMastery | null;
   conceptMastery: ConceptMastery[];
+  conceptMasteryByWeek: WeekMastery[];
+  currentWeek: number | null;
 };
 
 function getMasteryColor(score: number) {
@@ -103,41 +112,67 @@ export default function DashboardPage() {
           <div className="section-header" style={{ marginBottom: '20px' }}>
             <div>
               <div className="section-title">Concept Mastery — Class Average</div>
-              <div className="section-subtitle">Based on quiz performance across all students</div>
+              <div className="section-subtitle">Based on quiz performance, grouped by the week each concept is taught</div>
             </div>
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
-            {(summary?.conceptMastery ?? []).map(item => {
-              const color = getMasteryColor(item.avg);
-              const isWeak = item.avg < 40;
-              return (
-                <div key={item.concept}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                    <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>
-                      {item.concept}
-                    </span>
-                    <span style={{ fontSize: '14px', fontWeight: 700, color, display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      {item.avg}%
-                      {isWeak && <span style={{ color: '#f59e0b', fontSize: '14px' }}>!</span>}
-                    </span>
-                  </div>
-                  <div style={{ height: '12px', background: 'var(--bg-elevated)', borderRadius: '6px', overflow: 'hidden' }}>
-                    <div style={{
-                      height: '100%',
-                      width: `${item.avg}%`,
-                      background: color,
-                      borderRadius: '6px',
-                      transition: 'width 0.8s ease',
-                    }} />
-                  </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '22px' }}>
+            {(summary?.conceptMasteryByWeek ?? []).map(group => (
+              <div key={group.week}>
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px',
+                  paddingBottom: '6px', borderBottom: '1px solid var(--border)',
+                }}>
+                  <span style={{
+                    fontSize: '12px', fontWeight: 700, letterSpacing: '0.04em',
+                    textTransform: 'uppercase',
+                    color: group.isCurrent ? 'var(--primary-light)' : 'var(--text-muted)',
+                  }}>
+                    Week {group.week}
+                  </span>
+                  {group.isCurrent && (
+                    <span className="badge badge-success" style={{ fontSize: '10px' }}>This week</span>
+                  )}
+                  <span style={{ fontSize: '11px', color: 'var(--text-muted)', marginLeft: 'auto' }}>
+                    avg {group.avg}%
+                  </span>
                 </div>
-              );
-            })}
 
-            {!loading && !summary?.conceptMastery.length && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  {group.concepts.map(item => {
+                    const color = getMasteryColor(item.avg);
+                    const isWeak = item.avg < 40;
+                    return (
+                      <div key={`${group.week}-${item.concept}`}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                          <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                            {item.concept}
+                          </span>
+                          <span style={{ fontSize: '14px', fontWeight: 700, color, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            {item.avg}%
+                            {isWeak && <span style={{ color: '#f59e0b', fontSize: '14px' }}>!</span>}
+                          </span>
+                        </div>
+                        <div style={{ height: '12px', background: 'var(--bg-elevated)', borderRadius: '6px', overflow: 'hidden' }}>
+                          <div style={{
+                            height: '100%',
+                            width: `${item.avg}%`,
+                            background: color,
+                            borderRadius: '6px',
+                            transition: 'width 0.8s ease',
+                          }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+
+            {!loading && !summary?.conceptMasteryByWeek?.length && (
               <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>
-                No student mastery data yet. Students will appear here after they complete quizzes.
+                No concepts are assigned to a week yet. Upload materials and derive concepts on the{' '}
+                <Link href="/dashboard/concepts" style={{ color: 'var(--primary-light)' }}>Course Concepts</Link> page.
               </div>
             )}
           </div>

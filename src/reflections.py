@@ -10,16 +10,12 @@ agent because none of it runs as a graph node.
 import json
 import logging
 import os
-from pathlib import Path
 
 from langchain_openai import ChatOpenAI
 
-import course_rag
 import database as db
 
 log = logging.getLogger(__name__)
-
-MATERIALS_DIR = Path(__file__).resolve().parent.parent / "course_materials"
 
 # How many concepts a student may pick, and how many are offered.
 MAX_PICKS = 3
@@ -29,34 +25,19 @@ _llm = ChatOpenAI(temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"))
 
 
 def week_concepts(course_id: str, week: int) -> list[str]:
-    """Concepts covered by a week's materials, computed once and cached.
+    """The educator-confirmed concepts taught in a given week.
 
-    Falls back to the course-wide concept list when a week has no tagged
-    material, so a push never goes out with an empty keyboard.
+    Reads the concept/week links rather than extracting from the week's PDFs at
+    push time. Extraction happens once, at upload, and its output goes through
+    the educator's confirmed concept list — so the names here always match the
+    ones mastery and blind-spot scoring use. Re-extracting here would produce
+    near-miss variants ("Testing and Deployment" vs "Software Testing and
+    Deployment") that silently drop out of every downstream query.
+
+    Empty means the week has nothing linked yet; callers skip the push rather
+    than substituting another week's concepts.
     """
-    cached = db.get_week_concepts(course_id, week)
-    if cached:
-        return cached
-
-    concepts: list[str] = []
-    materials = db.list_materials(course_id, week_no=week)
-    if materials:
-        paths = [MATERIALS_DIR / course_id / m["filename"] for m in materials]
-        course = db.get_course(course_id)
-        try:
-            concepts = course_rag.suggest_course_concepts(
-                paths, course.get("name", "Course"), course.get("objectives", []),
-            )
-        except Exception:
-            log.exception("Could not derive concepts for week %s", week)
-
-    if not concepts:
-        concepts = db.get_course_concepts(course_id)
-
-    concepts = concepts[:MAX_BUTTONS]
-    if concepts:
-        db.set_week_concepts(course_id, week, concepts)
-    return concepts
+    return db.get_concepts_for_week(course_id, week)[:MAX_BUTTONS]
 
 
 def summarize_confusions(confusions: list[str]) -> str:
@@ -101,7 +82,7 @@ def build_digest_text(course_id: str, week: int) -> str | None:
     lines = [f"📊 *Week {week} — how the class answered*", ""]
     if top:
         picked = ", ".join(f"{name} ({count})" for name, count in top)
-        lines.append(f"Most picked: *{picked}*")
+        lines.append(f"Most picked concepts: *{picked}*")
 
     confusions = [item["confusion"].strip() for item in reflections if (item["confusion"] or "").strip()]
     if confusions:

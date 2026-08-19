@@ -29,6 +29,7 @@ from urllib3.util.retry import Retry
 import database as db
 import agent
 import reflections
+import revision
 from langgraph.types import Command
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -131,6 +132,42 @@ def send(chat_id: int, text: str, reply_markup=None, parse_mode="Markdown"):
     if user_id and message_id:
         db.record_conversation_message(user_id, "assistant", text, message_id)
     return response
+
+
+TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+
+
+def send_long(chat_id: int, text: str, reply_markup=None):
+    """Like send(), but splits text over Telegram's 4096-char hard cap.
+
+    /revise's confusions and blind-spot sections are built from a whole
+    semester of a student's own data and can exceed the limit; a plain send()
+    would just fail silently (Telegram returns ok: false, nothing raises).
+    Splits on blank-line boundaries so an entry (a week, a confusion) doesn't
+    get cut mid-sentence.
+    """
+    if len(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
+        return send(chat_id, text, reply_markup=reply_markup)
+
+    chunks: list[str] = []
+    current = ""
+    for block in text.split("\n\n"):
+        candidate = f"{current}\n\n{block}" if current else block
+        if len(candidate) > TELEGRAM_MAX_MESSAGE_LENGTH - 100:
+            if current:
+                chunks.append(current)
+            # A single block longer than the cap on its own: hard-truncate
+            # rather than send something Telegram will reject outright.
+            current = block[:TELEGRAM_MAX_MESSAGE_LENGTH - 100]
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+
+    result = None
+    for i, chunk in enumerate(chunks):
+        result = send(chat_id, chunk, reply_markup=reply_markup if i == len(chunks) - 1 else None)
+    return result
 
 
 def edit(chat_id: int, msg_id: int, text: str, reply_markup=None, parse_mode="Markdown"):
@@ -289,7 +326,7 @@ def parse_forced_activity_type(text: str) -> str:
     return aliases.get(requested, "unsupported")
 
 
-def handle_learning_activity(user_id: int, chat_id: int, forced_activity_type: str = ""):
+def handle_learning_activity(user_id: int, chat_id: int, forced_activity_type: str = "", forced_concept: str = ""):
     """/learn: run the adaptive learning graph and send the chosen activity."""
     student = db.get_student(user_id)
     if not student or not student.get("registered"):
@@ -317,6 +354,8 @@ def handle_learning_activity(user_id: int, chat_id: int, forced_activity_type: s
     }
     if forced_activity_type:
         graph_input["forced_activity_type"] = forced_activity_type
+    if forced_concept:
+        graph_input["forced_concept"] = forced_concept
 
     agent.learning_graph.invoke(graph_input, config)
     graph_state = agent.learning_graph.get_state(config)
@@ -411,6 +450,69 @@ def handle_history(user_id: int, chat_id: int):
     send(chat_id, "\n\n".join(lines), parse_mode=None)
 
 
+def revise_menu_markup() -> dict:
+    return inline_kb([
+        [("🎯 My blind spots", "revise_blind")],
+        [("❓ My confusions", "revise_confuse")],
+        [("📅 Week by week", "revise_timeline")],
+        [("✏️ Practice a blind spot", "revise_quiz")],
+    ])
+
+
+def handle_revise(user_id: int, chat_id: int):
+    """/revise: the student's own semester, cross-referencing what they picked
+    in reflections against what quizzes show they actually know."""
+    student = db.get_student(user_id)
+    if not student or not student.get("registered"):
+        send(chat_id, "Please send /start to register first.")
+        return
+
+    course_id = student.get("course_id", db.get_active_course_id())
+    typing(chat_id)
+    send(chat_id, revision.build_overview(user_id, course_id), reply_markup=revise_menu_markup())
+
+
+def handle_revise_callback(user_id: int, chat_id: int, msg_id: int, callback_id: str, data: str):
+    answer_callback(callback_id)
+    student = db.get_student(user_id)
+    if not student:
+        return
+    course_id = student.get("course_id", db.get_active_course_id())
+
+    if data == "revise_quiz":
+        spots = revision.rank_blind_spots(user_id, course_id)
+        if not spots:
+            send(chat_id, "No blind spot to practice yet — try /revise again after a few more weeks.")
+            return
+
+        # Repeated taps would otherwise always land on spots[0] — mastery moves
+        # in small increments, so one correct answer rarely bumps it out of first
+        # place. Work through the ranked list instead, then start over.
+        session = SESSIONS.setdefault(user_id, {})
+        practiced = session.setdefault("revise_practiced", set())
+        target = next((s for s in spots if s["concept"] not in practiced), None)
+        if target is None:
+            practiced.clear()
+            target = spots[0]
+        practiced.add(target["concept"])
+
+        edit(chat_id, msg_id, f"Practicing *{target['concept']}* — here's a question:")
+        handle_learning_activity(user_id, chat_id, forced_activity_type="quiz", forced_concept=target["concept"])
+        return
+
+    builders = {
+        "revise_blind": revision.build_blind_spots,
+        "revise_confuse": revision.build_confusions,
+        "revise_timeline": revision.build_timeline,
+    }
+    builder = builders.get(data)
+    if builder is None:
+        return
+
+    typing(chat_id)
+    send_long(chat_id, builder(user_id, course_id))
+
+
 def handle_help(chat_id: int):
     """/help: list all available commands."""
     send(chat_id,
@@ -423,10 +525,10 @@ def handle_help(chat_id: int):
          "• /progress — View your mastery\n"
          "• /memory — View remembered conversation context\n"
          "• /history — View recent saved conversation messages\n"
+         "• /revise — Your semester: blind spots, unresolved confusions, weekly picks\n"
          "• /help — Show this message\n\n"
          "💬 Or just *type any question* about the course!\n\n"
-         "_Examples: 'What is gradient descent?' / 'Explain backpropagation'_",
-         reply_markup=action_menu_markup())
+         "_Examples: 'What is gradient descent?' / 'Explain backpropagation'_")
 
 
 def handle_menu_callback(user_id: int, chat_id: int, msg_id: int,
@@ -785,6 +887,8 @@ def process_update(update: dict):
             handle_interest_callback(user_id, chat_id, msg_id, cb_id, data)
         elif data.startswith("style_"):
             handle_style_callback(user_id, chat_id, msg_id, cb_id, data)
+        elif data.startswith("revise_"):
+            handle_revise_callback(user_id, chat_id, msg_id, cb_id, data)
         elif data.startswith("reflskip_"):
             handle_reflection_skip(user_id, chat_id, msg_id, cb_id, data)
         elif data.startswith("reflexplain_"):
@@ -827,19 +931,29 @@ def process_update(update: dict):
         handle_memory(user_id, chat_id)
     elif text.startswith("/history"):
         handle_history(user_id, chat_id)
+    elif text.startswith("/revise"):
+        handle_revise(user_id, chat_id)
     elif text.startswith("/help"):
         handle_help(chat_id)
     else:
         handle_text(user_id, chat_id, text)
 
 
-WEEKLY_REFLECTION_TEMPLATE = (
-    "📚 *Week {week} reflection*\n\n"
-    "Which concepts mattered most this week? Tap up to {max_picks} — "
-    "it takes about ten seconds."
-)
-
 MAX_REFLECTION_PICKS = reflections.MAX_PICKS
+
+
+def weekly_reflection_text(course_id: str, week: int) -> str:
+    """The prompt students see, as worded by the educator.
+
+    Read per send rather than held in a constant so an edit in the dashboard
+    takes effect on the next push without restarting the bot.
+    """
+    template = db.get_reflection_prompt(course_id)
+    try:
+        return template.format(week=week, max_picks=MAX_REFLECTION_PICKS)
+    except (KeyError, IndexError, ValueError):
+        log.warning("Reflection prompt for %s has a bad placeholder; using the default.", course_id)
+        return db.DEFAULT_REFLECTION_PROMPT.format(week=week, max_picks=MAX_REFLECTION_PICKS)
 
 
 def reflection_keyboard(week: int, concepts: list[str], selected: list[str]) -> dict:
@@ -876,7 +990,7 @@ def handle_reflection_callback(user_id: int, chat_id: int, msg_id: int,
         selected = db.toggle_reflection_concept(user_id, course_id, week, concept)
         answer_callback(callback_id)
         edit(chat_id, msg_id,
-             WEEKLY_REFLECTION_TEMPLATE.format(week=week, max_picks=MAX_REFLECTION_PICKS),
+             weekly_reflection_text(course_id, week),
              reply_markup=reflection_keyboard(week, concepts, selected))
         return
 
@@ -937,10 +1051,14 @@ def _broadcast_weekly_push(week: int, scheduled):
     course_id = db.get_active_course_id()
     concepts = reflections.week_concepts(course_id, week)
     if not concepts:
-        log.warning("Week %s push skipped: no concepts to offer.", week)
+        # Recorded rather than just logged so the educator sees why nothing went
+        # out — a silently skipped week is indistinguishable from a broken bot.
+        db.set_skipped_push_week(course_id, week)
+        log.warning("Week %s push skipped: no materials tagged for that week.", week)
         return
+    db.clear_skipped_push_week(course_id)
 
-    text = WEEKLY_REFLECTION_TEMPLATE.format(week=week, max_picks=MAX_REFLECTION_PICKS)
+    text = weekly_reflection_text(course_id, week)
     keyboard = reflection_keyboard(week, concepts, [])
     students = db.list_students()
     sent = 0

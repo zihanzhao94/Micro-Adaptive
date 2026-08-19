@@ -265,8 +265,15 @@ def suggest_course_concepts(
     material_paths: list[Path],
     course_name: str,
     objectives: list[str] | None = None,
+    existing_concepts: list[str] | None = None,
 ) -> list[str]:
     """Suggest high-level concepts from the course's uploaded materials.
+
+    `existing_concepts` are reused verbatim wherever they fit. Each week's
+    materials are read separately, so without this the same topic comes back
+    worded differently each time ("Testing and Deployment" one week, "Software
+    Testing and Deployment" another) and a student's mastery ends up split
+    across near-duplicate concepts.
 
     The result is intentionally not persisted here. The educator must review and
     confirm it through the API before it becomes part of the course structure.
@@ -292,9 +299,16 @@ def suggest_course_concepts(
     prompt = """
 You are helping an educator define a course concept map.
 Based only on the uploaded course material and stated learning objectives, suggest
-5 to 12 high-level concepts for the whole course. Prefer durable teachable topics,
-not slide headings, week labels, individual tools, or overly narrow subtopics.
-Avoid duplicates and do not invent content.
+5 to 12 high-level concepts. Prefer durable teachable topics, not slide headings,
+week labels, individual tools, or overly narrow subtopics.
+
+Exclude course-administration items such as assessment weightings, class
+participation, assignment logistics, office hours or grading policy — they are not
+concepts a student can be taught or quizzed on.
+
+If an existing concept below already covers a topic in the material, reuse its name
+EXACTLY as written rather than rephrasing it. Only add a new name for a topic none
+of them cover. Avoid duplicates and do not invent content.
 
 Return ONLY valid JSON in this exact shape:
 {"concepts": ["Concept 1", "Concept 2"]}
@@ -302,7 +316,8 @@ Return ONLY valid JSON in this exact shape:
     llm = ChatOpenAI(temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"))
     raw = llm.invoke(
         f"Course: {course_name}\n"
-        f"Learning objectives: {objectives or []}\n\n"
+        f"Learning objectives: {objectives or []}\n"
+        f"Existing concepts (reuse these names exactly where they fit): {existing_concepts or []}\n\n"
         f"Uploaded material excerpts:\n{'\n\n'.join(excerpts)}\n\n{prompt}"
     ).content.strip()
 

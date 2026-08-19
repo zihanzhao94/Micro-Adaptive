@@ -208,6 +208,24 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_reflections_course_week
             ON reflections (course_id, week_no)
         """)
+        _add_column_if_missing(conn, "reflections", "confusion_answer", "TEXT")
+        # A concept can be taught across several weeks (and a week covers
+        # several concepts), so the week link is its own table rather than a
+        # column on course_concepts.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS concept_weeks (
+                course_id TEXT NOT NULL,
+                concept_id TEXT NOT NULL,
+                week_no INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (course_id, concept_id, week_no),
+                FOREIGN KEY (course_id) REFERENCES courses(course_id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_concept_weeks_course_week
+            ON concept_weeks (course_id, week_no)
+        """)
 
         _add_column_if_missing(conn, "courses", "educator_id", "TEXT")
         _add_column_if_missing(conn, "courses", "start_date", "TEXT")
@@ -713,8 +731,16 @@ def set_reflection_confusion(user_id: int, course_id: str, week_no: int, confusi
         """, (user_id, course_id, week_no, confusion, now, now))
 
 
-def list_reflections(course_id: str | None = None, week_no: int | None = None) -> list[dict]:
-    """Every student's reflection, newest first — the educator-facing view."""
+def list_reflections(
+    course_id: str | None = None,
+    week_no: int | None = None,
+    user_id: int | None = None,
+) -> list[dict]:
+    """Reflections matching the given filters, newest first.
+
+    Used both for the educator-facing view (all students, one week) and the
+    student-facing revision pack (one student, every week).
+    """
     init_db()
     course_id = course_id or get_active_course_id()
     query = """
@@ -727,6 +753,9 @@ def list_reflections(course_id: str | None = None, week_no: int | None = None) -
     if week_no is not None:
         query += " AND r.week_no = ?"
         params.append(week_no)
+    if user_id is not None:
+        query += " AND r.user_id = ?"
+        params.append(user_id)
     query += " ORDER BY r.week_no DESC, r.updated_at DESC"
 
     with _connect() as conn:
@@ -738,33 +767,19 @@ def list_reflections(course_id: str | None = None, week_no: int | None = None) -
         "week": row["week_no"],
         "concepts": json.loads(row["concepts_json"] or "[]"),
         "confusion": row["confusion"],
+        "confusionAnswer": row["confusion_answer"],
         "updatedAt": row["updated_at"],
     } for row in rows]
 
 
-def get_week_concepts(course_id: str, week_no: int) -> list[str] | None:
-    """Cached concept list for one teaching week (None when not computed yet)."""
-    init_db()
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT value FROM app_state WHERE key = ?",
-            (f"week_concepts:{course_id}:{week_no}",),
-        ).fetchone()
-    if row is None:
-        return None
-    try:
-        return json.loads(row["value"])
-    except json.JSONDecodeError:
-        return None
-
-
-def set_week_concepts(course_id: str, week_no: int, concepts: list[str]) -> None:
+def set_reflection_confusion_answer(user_id: int, course_id: str, week_no: int, answer: str) -> None:
+    """Cache the RAG answer to a confusion so /revise doesn't regenerate it."""
     init_db()
     with _connect() as conn:
         conn.execute("""
-            INSERT INTO app_state (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-        """, (f"week_concepts:{course_id}:{week_no}", json.dumps(concepts)))
+            UPDATE reflections SET confusion_answer = ?
+            WHERE user_id = ? AND course_id = ? AND week_no = ?
+        """, (answer, user_id, course_id, week_no))
 
 
 DIGEST_DELAY_HOURS = 24
@@ -790,6 +805,55 @@ def set_week_note(course_id: str, week_no: int, note: str) -> None:
         """, (f"week_note:{course_id}:{week_no}", note.strip()))
 
 
+DEFAULT_REFLECTION_PROMPT = (
+    "📚 *Week {week} reflection*\n\n"
+    "Which concepts mattered most this week? Tap up to {max_picks} — "
+    "it takes about ten seconds."
+)
+
+
+def get_reflection_prompt(course_id: str | None = None) -> str:
+    """The message students receive each week.
+
+    Stored rather than hardcoded so the educator can see exactly what goes out
+    and reword it — the wording is a teaching decision, not an implementation
+    detail.
+    """
+    course_id = course_id or get_active_course_id()
+    return _get_state(f"reflection_prompt:{course_id}") or DEFAULT_REFLECTION_PROMPT
+
+
+def set_reflection_prompt(course_id: str, prompt: str) -> None:
+    """Save the educator's wording, or reset to the default when blank."""
+    init_db()
+    with _connect() as conn:
+        if prompt.strip():
+            conn.execute("""
+                INSERT INTO app_state (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """, (f"reflection_prompt:{course_id}", prompt.strip()))
+        else:
+            conn.execute(
+                "DELETE FROM app_state WHERE key = ?", (f"reflection_prompt:{course_id}",)
+            )
+
+
+def get_cache(key: str) -> str | None:
+    """Generic string cache on top of app_state, for callers outside this
+    module that don't warrant their own named get/set pair (e.g. revision.py
+    caching LLM classification results)."""
+    return _get_state(f"cache:{key}")
+
+
+def set_cache(key: str, value: str) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO app_state (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """, (f"cache:{key}", value))
+
+
 def _get_state(key: str) -> str | None:
     init_db()
     with _connect() as conn:
@@ -805,6 +869,30 @@ def set_last_digest_slot(course_id: str, scheduled: datetime) -> None:
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """, (f"last_digest_slot:{course_id}", scheduled.isoformat()))
         _clear_send_now(conn, course_id, "digest")
+
+
+def set_skipped_push_week(course_id: str, week_no: int) -> None:
+    """Remember that a scheduled push couldn't go out for lack of materials."""
+    init_db()
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO app_state (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """, (f"skipped_push_week:{course_id}", str(week_no)))
+
+
+def clear_skipped_push_week(course_id: str) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute("DELETE FROM app_state WHERE key = ?", (f"skipped_push_week:{course_id}",))
+
+
+def get_skipped_push_week(course_id: str | None = None) -> int | None:
+    course_id = course_id or get_active_course_id()
+    try:
+        return int(_get_state(f"skipped_push_week:{course_id}"))
+    except (TypeError, ValueError):
+        return None
 
 
 def get_last_pushed_week(course_id: str | None = None) -> int | None:
@@ -975,6 +1063,7 @@ def replace_course_concepts(course_id: str, concepts: list[dict]) -> list[dict]:
             seen.add(key)
 
     now = datetime.now().isoformat()
+    kept_ids = {concept["id"] for concept in normalized}
     with _connect() as conn:
         conn.execute("DELETE FROM course_concepts WHERE course_id = ?", (course_id,))
         conn.executemany("""
@@ -986,7 +1075,154 @@ def replace_course_concepts(course_id: str, concepts: list[dict]) -> list[dict]:
             (course_id, concept["id"], concept["name"], position, now, now)
             for position, concept in enumerate(normalized)
         ])
+        # Concepts the educator removed would otherwise leave their week links
+        # behind, and those links drive which buttons a reflection push shows.
+        placeholders = ",".join("?" for _ in kept_ids)
+        if kept_ids:
+            conn.execute(
+                f"DELETE FROM concept_weeks WHERE course_id = ? AND concept_id NOT IN ({placeholders})",
+                (course_id, *kept_ids),
+            )
+        else:
+            conn.execute("DELETE FROM concept_weeks WHERE course_id = ?", (course_id,))
     return normalized
+
+
+def get_concepts_for_week(course_id: str, week_no: int) -> list[str]:
+    """Confirmed concept names taught in a given week, in display order."""
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute("""
+            SELECT c.name
+            FROM concept_weeks cw
+            JOIN course_concepts c
+              ON c.course_id = cw.course_id AND c.concept_id = cw.concept_id
+            WHERE cw.course_id = ? AND cw.week_no = ?
+            ORDER BY c.display_order, c.name COLLATE NOCASE
+        """, (course_id, week_no)).fetchall()
+    return [row["name"] for row in rows]
+
+
+def get_taught_concepts(course_id: str | None = None) -> list[str]:
+    """Concepts actually assigned to a teaching week.
+
+    Falls back to the full list when nothing has been assigned yet, so a course
+    part-way through setup still behaves. Used instead of get_course_concepts()
+    wherever a concept is being judged as taught-but-not-learned: a leftover
+    concept belonging to no week would otherwise surface as a student blind spot
+    purely because it never came up.
+    """
+    init_db()
+    course_id = course_id or get_active_course_id()
+    with _connect() as conn:
+        rows = conn.execute("""
+            SELECT DISTINCT c.name
+            FROM concept_weeks cw
+            JOIN course_concepts c
+              ON c.course_id = cw.course_id AND c.concept_id = cw.concept_id
+            WHERE cw.course_id = ?
+            ORDER BY c.display_order, c.name COLLATE NOCASE
+        """, (course_id,)).fetchall()
+
+    taught = [row["name"] for row in rows]
+    return taught or get_course_concepts(course_id)
+
+
+def get_weeks_by_concept(course_id: str | None = None) -> dict[str, list[int]]:
+    """concept_id -> the weeks it's taught in, for the educator's concept editor."""
+    init_db()
+    course_id = course_id or get_active_course_id()
+    with _connect() as conn:
+        rows = conn.execute("""
+            SELECT concept_id, week_no FROM concept_weeks
+            WHERE course_id = ? ORDER BY week_no
+        """, (course_id,)).fetchall()
+
+    weeks: dict[str, list[int]] = {}
+    for row in rows:
+        weeks.setdefault(row["concept_id"], []).append(row["week_no"])
+    return weeks
+
+
+def _concept_key(name: str) -> str:
+    """Normalised key for matching concept names.
+
+    Extraction runs separately per week, so the same topic comes back with small
+    wording differences ("System" vs "Systems Development Life Cycle", stray
+    punctuation). Matching on this key instead of the raw name keeps those from
+    becoming separate concepts that split a student's mastery in two.
+    """
+    words = "".join(char if char.isalnum() else " " for char in name.casefold()).split()
+    # Crude singular form: enough for the plural drift seen in practice, without
+    # pulling in a stemming dependency.
+    return " ".join(word[:-1] if len(word) > 3 and word.endswith("s") else word for word in words)
+
+
+def link_concepts_to_week(course_id: str, week_no: int, concept_names: list[str]) -> list[str]:
+    """Attach concepts to a week, creating any that don't exist yet.
+
+    Matching is case-insensitive against the confirmed list. Names that don't
+    match are added as new concepts rather than dropped — the educator reviews
+    and prunes them on the concepts page, which is less work than requiring
+    every upload to be reconciled by hand first.
+
+    Returns the names that were newly created.
+    """
+    init_db()
+    records = get_course_concept_records(course_id)
+    by_name = {_concept_key(record["name"]): record["id"] for record in records}
+    next_order = len(records)
+
+    now = datetime.now().isoformat()
+    links: list[tuple] = []
+    new_concepts: list[tuple] = []
+    created: list[str] = []
+
+    for raw_name in concept_names:
+        name = str(raw_name).strip()[:120]
+        if not name:
+            continue
+        key = _concept_key(name)
+        concept_id = by_name.get(key)
+        if concept_id is None:
+            concept_id = str(uuid.uuid4())
+            by_name[key] = concept_id
+            new_concepts.append((course_id, concept_id, name, next_order, now, now))
+            next_order += 1
+            created.append(name)
+        links.append((course_id, concept_id, week_no, now))
+
+    with _connect() as conn:
+        if new_concepts:
+            conn.executemany("""
+                INSERT INTO course_concepts (
+                    course_id, concept_id, name, display_order, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(course_id, name) DO NOTHING
+            """, new_concepts)
+        if links:
+            conn.executemany("""
+                INSERT INTO concept_weeks (course_id, concept_id, week_no, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(course_id, concept_id, week_no) DO NOTHING
+            """, links)
+    return created
+
+
+def set_concept_weeks(course_id: str, concept_id: str, weeks: list[int]) -> None:
+    """Replace the weeks a single concept is linked to (educator edit)."""
+    init_db()
+    now = datetime.now().isoformat()
+    with _connect() as conn:
+        conn.execute(
+            "DELETE FROM concept_weeks WHERE course_id = ? AND concept_id = ?",
+            (course_id, concept_id),
+        )
+        conn.executemany("""
+            INSERT INTO concept_weeks (course_id, concept_id, week_no, created_at)
+            VALUES (?, ?, ?, ?)
+        """, [(course_id, concept_id, int(w), now) for w in sorted(set(weeks))])
 
 
 def get_student_course_id(user_id: int) -> str:

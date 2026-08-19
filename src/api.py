@@ -10,9 +10,11 @@ from dotenv import load_dotenv
 try:
     from . import course_rag
     from . import database as db
+    from . import reflections
 except ImportError:
     import course_rag
     import database as db
+    import reflections
 
 
 app = FastAPI(title="Micro-Adaptive API")
@@ -67,6 +69,19 @@ class MaterialWeekUpdate(BaseModel):
 
 class WeekNoteUpdate(BaseModel):
     note: str = ""
+
+
+class ReflectionPromptUpdate(BaseModel):
+    prompt: str = ""
+
+
+class ConceptWeeksUpdate(BaseModel):
+    weeks: list[int] = []
+
+
+class LinkWeekConcepts(BaseModel):
+    week: int
+    concepts: list[str] = []
 
 
 class CourseConceptInput(BaseModel):
@@ -172,6 +187,33 @@ def _concept_mastery(students: list[dict]) -> list[dict]:
         {"concept": concept, "avg": round(sum(scores) / len(scores)) if scores else 0}
         for concept, scores in totals.items()
     ]
+
+
+def _concept_mastery_by_week(students: list[dict], course_id: str) -> list[dict]:
+    """Class mastery grouped by the week each concept is taught in.
+
+    A flat concept list gives no sense of when something was covered — week 2's
+    material sitting next to week 11's makes a low score look equally urgent
+    either way. Concepts taught in several weeks appear under each of them.
+    """
+    by_concept = {item["concept"]: item["avg"] for item in _concept_mastery(students)}
+    course = db.get_course(course_id)
+    total_weeks = course.get("totalWeeks") or 0
+    current_week = db.current_week_no(course_id)
+
+    groups = []
+    for week in range(1, total_weeks + 1):
+        concepts = db.get_concepts_for_week(course_id, week)
+        if not concepts:
+            continue
+        scored = [{"concept": name, "avg": by_concept.get(name, 0)} for name in concepts]
+        groups.append({
+            "week": week,
+            "isCurrent": week == current_week,
+            "avg": round(sum(item["avg"] for item in scored) / len(scored)),
+            "concepts": scored,
+        })
+    return groups
 
 
 def _extract_intention_concepts(text: str) -> list[str]:
@@ -293,13 +335,26 @@ def save_course_concepts(
 
 
 @app.post("/course/concepts/suggestions")
-def suggest_course_concepts(course_id: str | None = Query(default=None)):
+def suggest_course_concepts(
+    course_id: str | None = Query(default=None),
+    week: int | None = Query(default=None),
+):
+    """Suggest concepts, optionally scoped to one week's materials.
+
+    With `week`, only that week's uploads are read — so the concepts that come
+    back are the ones to link to that week, rather than a re-derivation of the
+    whole course.
+    """
     active_course_id = course_id or db.get_active_course_id()
     course = db.get_course(active_course_id)
-    materials = db.list_materials(active_course_id)
+    materials = db.list_materials(active_course_id, week_no=week)
     paths = [MATERIALS_DIR / active_course_id / item["filename"] for item in materials]
     if not paths:
-        raise HTTPException(status_code=400, detail="Upload course materials before generating suggestions.")
+        detail = (
+            f"No materials tagged for week {week}." if week is not None
+            else "Upload course materials before generating suggestions."
+        )
+        raise HTTPException(status_code=400, detail=detail)
 
     try:
         concepts = course_rag.suggest_course_concepts(
@@ -312,6 +367,200 @@ def suggest_course_concepts(course_id: str | None = Query(default=None)):
     return {"course_id": active_course_id, "concepts": concepts}
 
 
+@app.get("/course/concepts/weeks")
+def get_concept_weeks(course_id: str | None = Query(default=None)):
+    """Concepts grouped by teaching week, plus whatever isn't assigned yet.
+
+    Grouped this way rather than concept-by-concept because that's the shape the
+    educator thinks in ("what does week 3 cover?") and it matches how materials
+    are already listed.
+    """
+    active_course_id = course_id or db.get_active_course_id()
+    course = db.get_course(active_course_id)
+    total_weeks = course.get("totalWeeks")
+    records = db.get_course_concept_records(active_course_id)
+    weeks_by_concept = db.get_weeks_by_concept(active_course_id)
+
+    materials = db.list_materials(active_course_id)
+    material_counts: dict[int, int] = {}
+    for item in materials:
+        if item.get("week_no"):
+            material_counts[item["week_no"]] = material_counts.get(item["week_no"], 0) + 1
+
+    weeks = []
+    for week in range(1, (total_weeks or 0) + 1):
+        weeks.append({
+            "week": week,
+            "materialCount": material_counts.get(week, 0),
+            "concepts": [
+                {"id": record["id"], "name": record["name"]}
+                for record in records
+                if week in weeks_by_concept.get(record["id"], [])
+            ],
+        })
+
+    return {
+        "totalWeeks": total_weeks,
+        "weeks": weeks,
+        "unassigned": [
+            {"id": record["id"], "name": record["name"]}
+            for record in records if not weeks_by_concept.get(record["id"])
+        ],
+        "allConcepts": records,
+    }
+
+
+@app.post("/course/concepts/{concept_id}/weeks/{week}")
+def add_concept_to_week(concept_id: str, week: int, course_id: str | None = Query(default=None)):
+    active_course_id = course_id or db.get_active_course_id()
+    weeks = set(db.get_weeks_by_concept(active_course_id).get(concept_id, []))
+    weeks.add(week)
+    db.set_concept_weeks(active_course_id, concept_id, sorted(weeks))
+    return {"concept_id": concept_id, "weeks": sorted(weeks)}
+
+
+@app.delete("/course/concepts/{concept_id}/weeks/{week}")
+def remove_concept_from_week(concept_id: str, week: int, course_id: str | None = Query(default=None)):
+    """Unlink a concept from a week. The concept itself is kept — it may still
+    be taught in other weeks, and its mastery history stays valid either way."""
+    active_course_id = course_id or db.get_active_course_id()
+    weeks = set(db.get_weeks_by_concept(active_course_id).get(concept_id, []))
+    weeks.discard(week)
+    db.set_concept_weeks(active_course_id, concept_id, sorted(weeks))
+    return {"concept_id": concept_id, "weeks": sorted(weeks)}
+
+
+@app.put("/course/concepts/{concept_id}/weeks")
+def update_concept_weeks(
+    concept_id: str,
+    payload: ConceptWeeksUpdate,
+    course_id: str | None = Query(default=None),
+):
+    active_course_id = course_id or db.get_active_course_id()
+    db.set_concept_weeks(active_course_id, concept_id, payload.weeks)
+    return {"concept_id": concept_id, "weeks": sorted(set(payload.weeks))}
+
+
+@app.post("/course/concepts/link-week")
+def link_concepts_to_week(payload: LinkWeekConcepts, course_id: str | None = Query(default=None)):
+    """Attach concepts to a week, creating any that are new."""
+    active_course_id = course_id or db.get_active_course_id()
+    created = db.link_concepts_to_week(active_course_id, payload.week, payload.concepts)
+    return {
+        "week": payload.week,
+        "linked": db.get_concepts_for_week(active_course_id, payload.week),
+        "created": created,
+    }
+
+
+@app.post("/course/concepts/extract-week")
+def extract_week_concepts(week: int = Query(...), course_id: str | None = Query(default=None)):
+    """Read a week's materials, then add and link the concepts they cover.
+
+    One call so an upload immediately produces usable reflection buttons: the
+    extraction reuses existing concept names where they fit, new ones are added
+    to the course list, and everything found is linked to the week. The educator
+    prunes on the concepts page afterwards.
+    """
+    active_course_id = course_id or db.get_active_course_id()
+    course = db.get_course(active_course_id)
+    materials = db.list_materials(active_course_id, week_no=week)
+    paths = [MATERIALS_DIR / active_course_id / item["filename"] for item in materials]
+    if not paths:
+        raise HTTPException(status_code=400, detail=f"No materials tagged for week {week}.")
+
+    try:
+        concepts = course_rag.suggest_course_concepts(
+            paths,
+            course["name"],
+            course.get("objectives", []),
+            existing_concepts=db.get_course_concepts(active_course_id),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not derive concepts: {exc}") from exc
+
+    created = db.link_concepts_to_week(active_course_id, week, concepts)
+    return {
+        "week": week,
+        "linked": db.get_concepts_for_week(active_course_id, week),
+        "created": created,
+    }
+
+
+@app.get("/schedule/prompt")
+def get_reflection_prompt(course_id: str | None = Query(default=None)):
+    """The weekly prompt as students will actually receive it.
+
+    Returns both the raw template and a rendered preview, so the educator sees
+    the real message rather than having to imagine what {week} expands to.
+    """
+    active_course_id = course_id or db.get_active_course_id()
+    template = db.get_reflection_prompt(active_course_id)
+    week = db.current_week_no(active_course_id) or 1
+    # Same call the push uses, so the preview reflects the button cap rather
+    # than every concept linked to the week.
+    concepts = reflections.week_concepts(active_course_id, week)
+
+    try:
+        preview = template.format(week=week, max_picks=reflections.MAX_PICKS)
+    except (KeyError, IndexError, ValueError) as exc:
+        # A stray brace in the educator's wording shouldn't 500 the page.
+        preview = f"[This wording can't be rendered: {exc}]"
+
+    return {
+        "template": template,
+        "preview": preview,
+        "week": week,
+        "concepts": concepts,
+        "isDefault": template == db.DEFAULT_REFLECTION_PROMPT,
+        "default": db.DEFAULT_REFLECTION_PROMPT,
+    }
+
+
+@app.put("/schedule/prompt")
+def update_reflection_prompt(
+    payload: ReflectionPromptUpdate,
+    course_id: str | None = Query(default=None),
+):
+    """Save the educator's wording. An empty string restores the default."""
+    active_course_id = course_id or db.get_active_course_id()
+    prompt = payload.prompt.strip()
+
+    if prompt:
+        try:
+            prompt.format(week=1, max_picks=reflections.MAX_PICKS)
+        except (KeyError, IndexError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only {{week}} and {{max_picks}} can be used as placeholders ({exc}).",
+            )
+
+    db.set_reflection_prompt(active_course_id, prompt)
+    return get_reflection_prompt(course_id=active_course_id)
+
+
+@app.get("/schedule/status")
+def schedule_status(course_id: str | None = Query(default=None)):
+    """Whether this week is actually ready to send.
+
+    A week with no tagged materials is skipped rather than asked about with
+    other weeks' concepts, so the educator needs to see that before the
+    scheduled time rather than discover the silence afterwards.
+    """
+    active_course_id = course_id or db.get_active_course_id()
+    week = db.current_week_no(active_course_id)
+    if week is None:
+        return {"week": None, "materialCount": 0, "ready": False, "skippedWeek": None}
+
+    materials = db.list_materials(active_course_id, week_no=week)
+    return {
+        "week": week,
+        "materialCount": len(materials),
+        "ready": bool(materials),
+        "skippedWeek": db.get_skipped_push_week(active_course_id),
+    }
+
+
 @app.post("/schedule/send-now")
 def send_now(kind: str = Query(...), course_id: str | None = Query(default=None)):
     """Queue a manual send. The bot picks it up on its next poll (~30s)."""
@@ -322,6 +571,15 @@ def send_now(kind: str = Query(...), course_id: str | None = Query(default=None)
     course = db.get_course(active_course_id)
     if not course.get("pushEnabled"):
         raise HTTPException(status_code=400, detail="Enable weekly push before sending.")
+    if kind == "push":
+        week = db.current_week_no(active_course_id)
+        if week is not None and not db.list_materials(active_course_id, week_no=week):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Week {week} has no materials tagged yet — upload this week's "
+                       "slides first, or students would be asked about other weeks' concepts.",
+            )
+
     if kind == "digest":
         if not db.get_last_pushed_slot(active_course_id):
             raise HTTPException(status_code=400, detail="Send the weekly push first — a digest summarises its replies.")
@@ -365,7 +623,9 @@ def get_reflections(
 
     reflections = [item for item in all_reflections if item["week"] == current_week]
 
-    counts: dict[str, int] = {name: 0 for name in (db.get_week_concepts(active_course_id, current_week) or [])}
+    # Seed with the week's linked concepts so ones nobody picked still show as 0 —
+    # "taught but didn't land" is the signal this page exists for.
+    counts: dict[str, int] = {name: 0 for name in db.get_concepts_for_week(active_course_id, current_week)}
     for item in reflections:
         for concept in item["concepts"]:
             counts[concept] = counts.get(concept, 0) + 1
@@ -420,6 +680,7 @@ def dashboard_summary():
     students = _all_students()
     concept_mastery = _concept_mastery(students)
     weakest = min(concept_mastery, key=lambda item: item["avg"], default=None)
+    course_id = db.get_active_course_id()
 
     return {
         "totalStudents": len(students),
@@ -430,6 +691,8 @@ def dashboard_summary():
         "activeThisWeek": sum(1 for student in students if student["weeklyActive"] > 0),
         "weakestConcept": weakest,
         "conceptMastery": concept_mastery,
+        "conceptMasteryByWeek": _concept_mastery_by_week(students, course_id),
+        "currentWeek": db.current_week_no(course_id),
     }
 
 

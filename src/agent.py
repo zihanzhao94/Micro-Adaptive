@@ -14,6 +14,8 @@ import os
 import course_rag
 import skills
 
+SOCRATIC_ROUNDS = 2
+
 System_prompt = """
 You are a helpful and knowledgeable tutor for course subject from context provided.
 You will be provided with a student's question and their learning style (e.g., "analogy", "step-by-step", "visual"). 
@@ -128,6 +130,7 @@ class State(MessagesState):
     target_concept_id: str = ""          # stable ID retained across concept renames
     course_context: str = ""             # set by retrieve_course_context node
     forced_activity_type: str = ""       # optional testing override
+    forced_concept: str = ""             # optional: /revise practice targets a specific concept
     activity_type: str = "quiz"          # quiz / coding_task / diagram_prompt
     activity_reason: str = ""            # why the pedagogy node chose this activity
     difficulty: str = "medium"           # easy / medium / hard
@@ -146,6 +149,15 @@ def select_concept(state: State) -> dict:
     """
     mastery = state.get("mastery", {})
     course_concepts = state.get("course_concepts", [])
+    forced_concept = state.get("forced_concept", "")
+
+    if forced_concept:
+        match = next((c for c in course_concepts if c["name"] == forced_concept), None)
+        return {
+            "target_concept": forced_concept,
+            "target_concept_id": match["id"] if match else "",
+        }
+
     if course_concepts:
         # Include unpractised confirmed concepts at 0%, so a new student starts
         # from the course structure chosen by their educator.
@@ -447,7 +459,7 @@ def socratic_followup(state: State) -> dict:
 def route_socratic_attempt(state: State) -> Literal["socratic_followup", "explain_answer", "message_feedback"]:
     if state["is_correct"]:
         return "message_feedback"                    # 学生理解了，结束
-    elif state.get("socratic_round", 0) >= 3:
+    elif state.get("socratic_round", 0) >= SOCRATIC_ROUNDS:
         return "explain_answer"                      # 3轮仍未理解，直接讲解
     else:
         return "socratic_followup"                   # 继续追问
