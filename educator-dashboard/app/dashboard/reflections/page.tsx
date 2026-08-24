@@ -16,8 +16,27 @@ interface Confusion {
   updatedAt: string;
 }
 
+interface UnmatchedItem {
+  text: string;
+  count: number;
+}
+
+interface Misconception {
+  studentName: string;
+  text: string;
+}
+
+interface ClassAnalysis {
+  summary: string;
+  highlights: string[];
+  responded: number;
+}
+
 interface ReflectionsResponse {
   week: number | null;
+  analysis: ClassAnalysis | null;
+  unmatched: UnmatchedItem[];
+  misconceptions: Misconception[];
   availableWeeks: number[];
   respondedCount: number;
   totalStudents: number;
@@ -28,7 +47,7 @@ interface ReflectionsResponse {
 
 const EMPTY: ReflectionsResponse = {
   week: null, availableWeeks: [], respondedCount: 0, totalStudents: 0,
-  concepts: [], confusions: [], note: '',
+  concepts: [], confusions: [], unmatched: [], misconceptions: [], analysis: null, note: '',
 };
 
 export default function ReflectionsPage() {
@@ -36,8 +55,6 @@ export default function ReflectionsPage() {
   const [week, setWeek] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
-  const [note, setNote] = useState('');
-  const [savingNote, setSavingNote] = useState(false);
 
   const load = useCallback(async (requestedWeek: number | null) => {
     setLoading(true);
@@ -48,7 +65,6 @@ export default function ReflectionsPage() {
       const body: ReflectionsResponse = await response.json();
       setData(body);
       setWeek(body.week);
-      setNote(body.note ?? '');
       setMessage('');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Could not load reflections.');
@@ -58,24 +74,6 @@ export default function ReflectionsPage() {
   }, []);
 
   useEffect(() => { load(null); }, [load]);
-
-  const saveNote = async () => {
-    if (data.week === null) return;
-    setSavingNote(true);
-    try {
-      const response = await fetch(`${API_BASE}/reflections/${data.week}/note`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ note }),
-      });
-      if (!response.ok) throw new Error('Could not save note.');
-      setMessage('Note saved — it goes out with this week’s class digest.');
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Could not save note.');
-    } finally {
-      setSavingNote(false);
-    }
-  };
 
   const responseRate = data.totalStudents
     ? Math.round((data.respondedCount / data.totalStudents) * 100)
@@ -116,20 +114,132 @@ export default function ReflectionsPage() {
             <MessageSquareQuote size={28} style={{ color: 'var(--text-muted)', marginBottom: '12px' }} />
             <div style={{ fontSize: '14px', fontWeight: 600 }}>No reflections have come in yet</div>
             <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
-              Once a weekly push goes out and students tap their concepts, their answers appear here.
+              Once a weekly push goes out and students write what they remember, their answers appear here.
             </div>
           </div>
         )}
 
         {data.week !== null && (
           <>
-            <div className="card" style={{ marginBottom: '16px' }}>
+            {data.analysis && (data.analysis.summary || data.analysis.highlights.length > 0) && (
+              <div className="card" style={{ marginBottom: '16px', borderLeft: '3px solid var(--primary)' }}>
+                <div style={{ fontSize: '14px', fontWeight: 700, marginBottom: '10px' }}>
+                  This week, in short
+                </div>
+
+                {data.analysis.highlights.map(line => (
+                  <div key={line} style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                    · {line}
+                  </div>
+                ))}
+
+                {data.analysis.summary && (
+                  <div style={{ fontSize: '13px', lineHeight: 1.7, marginTop: '10px' }}>
+                    {data.analysis.summary}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="card">
               <div style={{ fontSize: '14px', fontWeight: 700, marginBottom: '4px' }}>
-                What students thought mattered
+                Common uncertainties ({data.confusions.length})
               </div>
               <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '18px' }}>
-                Concepts this week&apos;s material covered, ranked by how many students picked them.
-                A zero means it was taught but did not land.
+                What students said they were unsure about, in their own words — material for the
+                first five minutes of your next lecture.
+              </div>
+
+              {data.confusions.length === 0 ? (
+                <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+                  Nobody reported a confusion this week.
+                </div>
+              ) : data.confusions.map(confusion => (
+                <div
+                  key={`${confusion.studentName}-${confusion.updatedAt}`}
+                  style={{
+                    borderLeft: '2px solid var(--primary)',
+                    paddingLeft: '12px',
+                    marginBottom: '14px',
+                  }}
+                >
+                  <div style={{ fontSize: '13px', lineHeight: 1.6 }}>{confusion.text}</div>
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                    {confusion.studentName}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {data.misconceptions.length > 0 && (
+              <div className="card" style={{ marginTop: '16px' }}>
+                <div style={{ fontSize: '14px', fontWeight: 700, marginBottom: '4px' }}>
+                  Possible misconceptions ({data.misconceptions.length})
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '18px' }}>
+                  Descriptions that read as incorrect or half-formed. Flagged from a few lines of
+                  writing, so treat each as worth a look rather than a finding — a student may
+                  simply have been brief.
+                </div>
+
+                {data.misconceptions.map((item, index) => (
+                  <div
+                    key={`${item.studentName}-${index}`}
+                    style={{
+                      borderLeft: '2px solid var(--warning, #e0a458)',
+                      paddingLeft: '12px',
+                      marginBottom: '14px',
+                    }}
+                  >
+                    <div style={{ fontSize: '13px', lineHeight: 1.6 }}>“{item.text}”</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                      {item.studentName}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {data.unmatched.length > 0 && (
+              <div className="card" style={{ marginTop: '16px' }}>
+                <div style={{ fontSize: '14px', fontWeight: 700, marginBottom: '4px' }}>
+                  Mentioned but not in your concept list ({data.unmatched.length})
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '14px' }}>
+                  Students wrote about these, but they match none of week {data.week}&apos;s
+                  concepts. Something several students mention usually means the concept list is
+                  missing it; a one-off may be a misconception worth a look.
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                  {data.unmatched.map(item => (
+                    <span
+                      key={item.text}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: '6px',
+                        fontSize: '12px', padding: '4px 9px', borderRadius: '4px',
+                        background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+                      }}
+                    >
+                      {item.text}
+                      {item.count > 1 && (
+                        <span style={{ fontSize: '10px', color: 'var(--primary-light)', fontWeight: 700 }}>
+                          ×{item.count}
+                        </span>
+                      )}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="card" style={{ marginTop: '16px' }}>
+              <div style={{ fontSize: '14px', fontWeight: 700, marginBottom: '4px' }}>
+                Concept recall
+              </div>
+              <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '18px' }}>
+                How many students named each of this week&apos;s concepts unprompted. Students were
+                asked for about three things, so read this as which concepts came to mind most
+                readily — not as how well each was understood.
               </div>
 
               {data.concepts.map(concept => (
@@ -159,61 +269,6 @@ export default function ReflectionsPage() {
               ))}
             </div>
 
-            <div className="card">
-              <div style={{ fontSize: '14px', fontWeight: 700, marginBottom: '4px' }}>
-                Still unclear ({data.confusions.length})
-              </div>
-              <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '18px' }}>
-                Raw answers, in students&apos; own words — material for the first five minutes of your next lecture.
-              </div>
-
-              {data.confusions.length === 0 ? (
-                <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
-                  Nobody reported a confusion this week.
-                </div>
-              ) : data.confusions.map(confusion => (
-                <div
-                  key={`${confusion.studentName}-${confusion.updatedAt}`}
-                  style={{
-                    borderLeft: '2px solid var(--primary)',
-                    paddingLeft: '12px',
-                    marginBottom: '14px',
-                  }}
-                >
-                  <div style={{ fontSize: '13px', lineHeight: 1.6 }}>{confusion.text}</div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                    {confusion.studentName}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="card" style={{ marginTop: '16px' }}>
-              <div style={{ fontSize: '14px', fontWeight: 700, marginBottom: '4px' }}>
-                Add a line for the class (optional)
-              </div>
-              <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '14px' }}>
-                24 hours after each push, students get a digest of how the class answered.
-                Anything you write here is appended to it. The digest goes out either way.
-              </div>
-              <textarea
-                id="weekNote"
-                className="form-input form-textarea"
-                rows={2}
-                placeholder="e.g. I'll spend the first 5 minutes of Monday's lecture on 3NF vs BCNF."
-                value={note}
-                onChange={e => setNote(e.target.value)}
-              />
-              <button
-                id="saveNoteBtn"
-                className="btn btn-primary btn-sm"
-                style={{ marginTop: '12px' }}
-                onClick={saveNote}
-                disabled={savingNote}
-              >
-                {savingNote ? 'Saving…' : 'Save note'}
-              </button>
-            </div>
           </>
         )}
       </div>

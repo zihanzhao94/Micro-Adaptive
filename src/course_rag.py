@@ -266,6 +266,7 @@ def suggest_course_concepts(
     course_name: str,
     objectives: list[str] | None = None,
     existing_concepts: list[str] | None = None,
+    max_concepts: int = 12,
 ) -> list[str]:
     """Suggest high-level concepts from the course's uploaded materials.
 
@@ -274,6 +275,10 @@ def suggest_course_concepts(
     worded differently each time ("Testing and Deployment" one week, "Software
     Testing and Deployment" another) and a student's mastery ends up split
     across near-duplicate concepts.
+
+    `max_concepts` caps the list. One week's slides cover far fewer topics than a
+    whole course, and asking for the course-sized range makes the model pad the
+    list with slide headings to reach it.
 
     The result is intentionally not persisted here. The educator must review and
     confirm it through the API before it becomes part of the course structure.
@@ -296,24 +301,43 @@ def suggest_course_concepts(
     if not excerpts:
         raise ValueError("No readable uploaded course materials were found.")
 
-    prompt = """
+    prompt = f"""
 You are helping an educator define a course concept map.
-Based only on the uploaded course material and stated learning objectives, suggest
-5 to 12 high-level concepts. Prefer durable teachable topics, not slide headings,
-week labels, individual tools, or overly narrow subtopics.
+Based only on the uploaded material, suggest AT MOST {max_concepts} high-level
+concepts — fewer is better. Give only the topics a student should still remember
+later; prefer durable teachable topics, not slide headings, week labels, individual
+tools, or overly narrow subtopics. Do not pad the list to reach the limit.
+
+Order the list from most to least important, and judge importance in this order:
+
+1. What the material itself says it is teaching. Slides that state learning
+   objectives, an agenda, "by the end of this session you will…", or a summary are
+   the lecturer's own statement of what matters — weight those above everything else.
+2. How much of the material is spent on a topic. Something developed over many pages
+   outranks something named once in passing.
+3. Only where neither of the above settles it, your own reading of the subject.
+
+A topic that is merely mentioned, or that reads as a general theme rather than
+something taught in this material, belongs at the bottom or not at all.
 
 Exclude course-administration items such as assessment weightings, class
 participation, assignment logistics, office hours or grading policy — they are not
-concepts a student can be taught or quizzed on.
+concepts a student can be taught.
 
 If an existing concept below already covers a topic in the material, reuse its name
 EXACTLY as written rather than rephrasing it. Only add a new name for a topic none
-of them cover. Avoid duplicates and do not invent content.
+of them cover. But do not reach for an existing name just because it is available:
+only reuse one the material genuinely covers. Avoid duplicates and do not invent
+content.
 
-Return ONLY valid JSON in this exact shape:
-{"concepts": ["Concept 1", "Concept 2"]}
+Return ONLY valid JSON, most important first:
+{{"concepts": ["Most important", "Next most important"]}}
 """
-    llm = ChatOpenAI(temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"))
+    llm = ChatOpenAI(
+    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+    temperature=0,
+    openai_api_key=os.getenv("OPENAI_API_KEY"),
+)
     raw = llm.invoke(
         f"Course: {course_name}\n"
         f"Learning objectives: {objectives or []}\n"
@@ -332,7 +356,9 @@ Return ONLY valid JSON in this exact shape:
 
     if not isinstance(concepts, list):
         raise ValueError("The concept suggestion response did not contain a concept list.")
-    return [str(concept).strip() for concept in concepts if str(concept).strip()][:12]
+    # The model is asked to order by importance, so this keeps the top N rather
+    # than an arbitrary slice.
+    return [str(concept).strip() for concept in concepts if str(concept).strip()][:max_concepts]
 
 
 if __name__ == "__main__":

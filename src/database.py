@@ -209,6 +209,18 @@ def init_db():
             ON reflections (course_id, week_no)
         """)
         _add_column_if_missing(conn, "reflections", "confusion_answer", "TEXT")
+        # What the student actually wrote, kept verbatim. concepts_json below is
+        # derived from it by classification and is lossy, so the raw text stays
+        # the source of truth — a better prompt later can re-derive from this.
+        _add_column_if_missing(conn, "reflections", "recall_text", "TEXT")
+        # Things they wrote that matched no course concept: possibly a topic the
+        # concept map is missing, possibly a misconception. Either way it's a
+        # signal for the educator, not noise to discard.
+        _add_column_if_missing(conn, "reflections", "unmatched_json", "TEXT NOT NULL DEFAULT '[]'")
+        # Phrases a student used that read as incorrect or half-formed. Stored as
+        # their own words, never a diagnosis — the model is reading three lines
+        # without the lecture, so this is a pointer for the lecturer to judge.
+        _add_column_if_missing(conn, "reflections", "shaky_json", "TEXT NOT NULL DEFAULT '[]'")
         # A concept can be taught across several weeks (and a week covers
         # several concepts), so the week link is its own table rather than a
         # column on course_concepts.
@@ -686,9 +698,50 @@ def get_reflection(user_id: int, course_id: str, week_no: int) -> dict | None:
         "user_id": row["user_id"],
         "week_no": row["week_no"],
         "concepts": json.loads(row["concepts_json"] or "[]"),
+        "unmatched": json.loads(row["unmatched_json"] or "[]"),
+        "shaky": json.loads(row["shaky_json"] or "[]"),
+        "recall_text": row["recall_text"],
         "confusion": row["confusion"],
+        "confusion_answer": row["confusion_answer"],
         "updated_at": row["updated_at"],
     }
+
+
+def save_reflection_recall(
+    user_id: int,
+    course_id: str,
+    week_no: int,
+    recall_text: str,
+    concepts: list[str] | None = None,
+    unmatched: list[str] | None = None,
+    shaky: list[str] | None = None,
+) -> None:
+    """Store what a student wrote, plus the concepts it was classified into.
+
+    Written in one step but with the raw text first in mind: callers save the
+    text even when classification fails, so a slow or erroring LLM never costs
+    the student their answer.
+    """
+    init_db()
+    now = datetime.now().isoformat()
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO reflections (
+                user_id, course_id, week_no, recall_text, concepts_json,
+                unmatched_json, shaky_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, course_id, week_no) DO UPDATE SET
+                recall_text = excluded.recall_text,
+                concepts_json = excluded.concepts_json,
+                unmatched_json = excluded.unmatched_json,
+                shaky_json = excluded.shaky_json,
+                updated_at = excluded.updated_at
+        """, (
+            user_id, course_id, week_no, recall_text,
+            json.dumps(concepts or []), json.dumps(unmatched or []),
+            json.dumps(shaky or []), now, now,
+        ))
 
 
 def toggle_reflection_concept(user_id: int, course_id: str, week_no: int, concept: str) -> list[str]:
@@ -766,6 +819,9 @@ def list_reflections(
         "studentName": row["student_name"] or f"Student {row['user_id']}",
         "week": row["week_no"],
         "concepts": json.loads(row["concepts_json"] or "[]"),
+        "unmatched": json.loads(row["unmatched_json"] or "[]"),
+        "shaky": json.loads(row["shaky_json"] or "[]"),
+        "recallText": row["recall_text"],
         "confusion": row["confusion"],
         "confusionAnswer": row["confusion_answer"],
         "updatedAt": row["updated_at"],
@@ -806,9 +862,12 @@ def set_week_note(course_id: str, week_no: int, note: str) -> None:
 
 
 DEFAULT_REFLECTION_PROMPT = (
-    "📚 *Week {week} reflection*\n\n"
-    "Which concepts mattered most this week? Tap up to {max_picks} — "
-    "it takes about ten seconds."
+    "📚 *Week {week}*\n\n"
+    "Thinking back on this week, what are the *{max_picks} most important things* "
+    "you learned?\n\n"
+    "Just write them in your own words — one line each is plenty, and there's no "
+    "wrong answer.\n\n"
+    "_Deliberately no list to pick from: recalling it yourself is the part that helps._"
 )
 
 

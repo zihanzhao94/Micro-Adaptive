@@ -1,0 +1,61 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.3.6 Chrome/140.0.7339.249 Electron/38.8.0 Safari/537.36" version="29.3.6">
+  <diagram id="reflectionWorkflow" name="Page-1">
+    <mxGraphModel dx="1257" dy="721" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="lecture" parent="1" style="rounded=1;whiteSpace=wrap;html=1;strokeWidth=2;fillColor=#ffffff;strokeColor=#222222;fontSize=16;" value="&lt;b&gt;Lecture, Week N&lt;/b&gt;" vertex="1">
+          <mxGeometry height="60" width="300" x="435" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="reflection" parent="1" style="rounded=1;whiteSpace=wrap;html=1;strokeWidth=2;fillColor=#f5fbf7;strokeColor=#1b7f5c;fontSize=15;align=center;verticalAlign=middle;spacing=10;" value="&lt;b&gt;Weekly Reflection (Student)&lt;/b&gt;&lt;br&gt;&lt;br&gt;• What are the 3 most important things you learned?&lt;br&gt;• What are you still unsure about?&lt;br&gt;&lt;font color=&#39;#666666&#39;&gt;(free recall, in their own words)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="140" width="510" x="330" y="130" as="geometry" />
+        </mxCell>
+        <mxCell id="uncertainty" parent="1" style="rounded=1;whiteSpace=wrap;html=1;strokeWidth=2;fillColor=#f6f9ff;strokeColor=#2f64d6;fontSize=15;align=center;verticalAlign=middle;spacing=10;" value="&lt;b&gt;Self-Reported Uncertainties&lt;/b&gt;&lt;br&gt;&lt;br&gt;Students list what they are not confident about" vertex="1">
+          <mxGeometry height="110" width="340" x="120" y="350" as="geometry" />
+        </mxCell>
+        <mxCell id="compare" parent="1" style="rounded=1;whiteSpace=wrap;html=1;strokeWidth=2;fillColor=#f6f9ff;strokeColor=#2f64d6;fontSize=15;align=center;verticalAlign=middle;spacing=10;" value="&lt;b&gt;Compare with Weekly Concepts&lt;/b&gt;&lt;br&gt;&lt;br&gt;Match students’ responses against the week’s key concept list" vertex="1">
+          <mxGeometry height="110" width="340" x="710" y="350" as="geometry" />
+        </mxCell>
+        <mxCell id="unmentioned" parent="1" style="rounded=1;whiteSpace=wrap;html=1;strokeWidth=2;fillColor=#fbfcff;strokeColor=#2f64d6;fontSize=14;align=center;verticalAlign=middle;spacing=8;" value="&lt;b&gt;Unmentioned Concepts&lt;/b&gt;&lt;br&gt;&lt;br&gt;Key concepts not mentioned in the reflection" vertex="1">
+          <mxGeometry height="100" width="250" x="650" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="misconception" parent="1" style="rounded=1;whiteSpace=wrap;html=1;strokeWidth=2;fillColor=#fbfcff;strokeColor=#2f64d6;fontSize=14;align=center;verticalAlign=middle;spacing=8;" value="&lt;b&gt;Possible Misconceptions /&lt;br&gt;Incomplete Understanding&lt;/b&gt;&lt;br&gt;&lt;br&gt;Descriptions that may be incorrect or incomplete" vertex="1">
+          <mxGeometry height="110" width="250" x="930" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="analysis" parent="1" style="rounded=1;whiteSpace=wrap;html=1;strokeWidth=2;fillColor=#f7f9ff;strokeColor=#2f64d6;fontSize=14;align=left;verticalAlign=middle;spacingLeft=18;spacingTop=8;" value="&lt;b&gt;AI Analysis&lt;/b&gt;&lt;br&gt;&lt;br&gt;• Extract key ideas from reflection&lt;br&gt;• Identify self-reported uncertainties&lt;br&gt;• Detect unmentioned concepts&lt;br&gt;• Detect possible misconceptions / incomplete understanding&lt;br&gt;• Aggregate results across class" vertex="1">
+          <mxGeometry height="170" width="540" x="320" y="700" as="geometry" />
+        </mxCell>
+        <mxCell id="dashboard" parent="1" style="rounded=1;whiteSpace=wrap;html=1;strokeWidth=2;fillColor=#faf7ff;strokeColor=#6f42c1;fontSize=15;align=center;verticalAlign=middle;spacing=10;" value="&lt;b&gt;Instructor Dashboard&lt;/b&gt;&lt;br&gt;&lt;br&gt;Common learning gaps  •  Common uncertainties  •  Possible misconceptions  •  AI summary" vertex="1">
+          <mxGeometry height="120" width="620" x="280" y="930" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" edge="1" parent="1" source="lecture" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;endFill=1;" target="reflection">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" edge="1" parent="1" source="reflection" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;endFill=1;" target="uncertainty">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" edge="1" parent="1" source="reflection" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;endFill=1;" target="compare">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" edge="1" parent="1" source="compare" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;endFill=1;" target="unmentioned">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" edge="1" parent="1" source="compare" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;endFill=1;" target="misconception">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" edge="1" parent="1" source="uncertainty" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;endFill=1;" target="analysis">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" edge="1" parent="1" source="unmentioned" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;endFill=1;" target="analysis">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" edge="1" parent="1" source="misconception" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;endFill=1;" target="analysis">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" edge="1" parent="1" source="analysis" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;endArrow=block;endFill=1;" target="dashboard">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

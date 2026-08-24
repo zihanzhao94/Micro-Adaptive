@@ -35,6 +35,10 @@ app.add_middleware(
 MATERIALS_DIR = Path(__file__).resolve().parent.parent / "course_materials"
 ALLOWED_EXTENSIONS = {".txt", ".pdf"}
 
+# Ceiling for one week's extraction. The course-wide range (up to 12) makes the
+# model pad a single lecture's list with slide headings to reach it.
+MAX_WEEK_CONCEPTS = 10
+
 TEACHING_INTENTION = {
     "week": "Current Week",
     "text": "",
@@ -361,6 +365,7 @@ def suggest_course_concepts(
             paths,
             course["name"],
             course.get("objectives", []),
+            max_concepts=MAX_WEEK_CONCEPTS if week is not None else 12,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Could not generate concept suggestions: {exc}") from exc
@@ -475,6 +480,7 @@ def extract_week_concepts(week: int = Query(...), course_id: str | None = Query(
             course["name"],
             course.get("objectives", []),
             existing_concepts=db.get_course_concepts(active_course_id),
+            max_concepts=MAX_WEEK_CONCEPTS,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Could not derive concepts: {exc}") from exc
@@ -619,22 +625,49 @@ def get_reflections(
             "totalStudents": len(db.list_students()),
             "concepts": [],
             "confusions": [],
+            "unmatched": [],
+            "misconceptions": [],
+            "note": "",
+            "analysis": {"summary": "", "highlights": [], "responded": 0},
         }
 
-    reflections = [item for item in all_reflections if item["week"] == current_week]
+    # Named week_entries, not reflections: a local called `reflections` shadows
+    # the module imported at the top of this file, and the class_analysis call
+    # below then runs against a list and 500s.
+    week_entries = [item for item in all_reflections if item["week"] == current_week]
 
-    # Seed with the week's linked concepts so ones nobody picked still show as 0 —
-    # "taught but didn't land" is the signal this page exists for.
+    # Seed with the week's linked concepts so ones nobody recalled still show as
+    # 0 — "taught but nobody brought it up" is the signal this page exists for.
     counts: dict[str, int] = {name: 0 for name in db.get_concepts_for_week(active_course_id, current_week)}
-    for item in reflections:
+    for item in week_entries:
         for concept in item["concepts"]:
             counts[concept] = counts.get(concept, 0) + 1
+
+    # Grouped so a phrase several students raised stands out from a one-off: a
+    # repeated unmatched phrase usually means the concept map is missing
+    # something the lecture actually covered.
+    unmatched_counts: dict[str, int] = {}
+    for item in week_entries:
+        for phrase in item.get("unmatched", []):
+            key = phrase.strip()
+            if key:
+                unmatched_counts[key] = unmatched_counts.get(key, 0) + 1
 
     return {
         "week": current_week,
         "availableWeeks": available_weeks,
-        "respondedCount": len(reflections),
+        "respondedCount": len(week_entries),
         "totalStudents": len(db.list_students()),
+        "unmatched": [
+            {"text": text, "count": count}
+            for text, count in sorted(unmatched_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        ],
+        # Attributed, because the lecturer's next move is to look at what that
+        # student actually wrote rather than to act on a count.
+        "misconceptions": [
+            {"studentName": item["studentName"], "text": phrase}
+            for item in week_entries for phrase in item.get("shaky", [])
+        ],
         "concepts": [
             {"name": name, "count": count}
             for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -645,9 +678,10 @@ def get_reflections(
                 "text": item["confusion"],
                 "updatedAt": item["updatedAt"],
             }
-            for item in reflections if (item["confusion"] or "").strip()
+            for item in week_entries if (item["confusion"] or "").strip()
         ],
         "note": db.get_week_note(active_course_id, current_week),
+        "analysis": reflections.class_analysis(active_course_id, current_week),
     }
 
 

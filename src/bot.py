@@ -74,6 +74,7 @@ STATES = {
     "WAIT_STYLE":  "wait_style",
     "WAIT_ACTIVITY_SUBMISSION": "wait_activity_submission",
     "IN_SOCRATIC": "in_socratic",   # waiting for student's Socratic reply
+    "WAIT_REFLECTION_RECALL": "wait_reflection_recall",
     "WAIT_REFLECTION_CONFUSION": "wait_reflection_confusion",
 }
 
@@ -729,6 +730,17 @@ def handle_text(user_id: int, chat_id: int, text: str):
              reply_markup=inline_kb(rows))
         return
 
+    # ── Weekly reflection: the free-recall answer ────────────────────────────
+    if state == STATES["WAIT_REFLECTION_RECALL"]:
+        week = session.get("reflection_week")
+        SESSIONS[user_id]["state"] = STATES["IDLE"]
+        SESSIONS[user_id].pop("reflection_week", None)
+        if week is None:
+            send(chat_id, "That reflection expired — ask me anything about the course.")
+            return
+        handle_reflection_recall(user_id, chat_id, week, text)
+        return
+
     # ── Weekly reflection: the optional "what's still unclear" answer ─────────
     if state == STATES["WAIT_REFLECTION_CONFUSION"]:
         week = session.get("reflection_week")
@@ -893,8 +905,6 @@ def process_update(update: dict):
             handle_reflection_skip(user_id, chat_id, msg_id, cb_id, data)
         elif data.startswith("reflexplain_"):
             handle_reflection_explain(user_id, chat_id, msg_id, cb_id, data)
-        elif data.startswith("refl_"):
-            handle_reflection_callback(user_id, chat_id, msg_id, cb_id, data)
         elif data.startswith("menu_"):
             handle_menu_callback(user_id, chat_id, msg_id, cb_id, data)
         return
@@ -956,65 +966,47 @@ def weekly_reflection_text(course_id: str, week: int) -> str:
         return db.DEFAULT_REFLECTION_PROMPT.format(week=week, max_picks=MAX_REFLECTION_PICKS)
 
 
-def reflection_keyboard(week: int, concepts: list[str], selected: list[str]) -> dict:
-    """Concept buttons plus Done. Callback data carries the index, not the name,
-    because Telegram caps callback_data at 64 bytes."""
-    rows = [
-        [(f"{'✓ ' if concept in selected else ''}{concept}", f"refl_{week}_c{i}")]
-        for i, concept in enumerate(concepts)
-    ]
-    rows.append([(f"✅ Done ({len(selected)}/{MAX_REFLECTION_PICKS})", f"refl_{week}_done")])
-    return inline_kb(rows)
+def handle_reflection_recall(user_id: int, chat_id: int, week: int, text: str):
+    """A student's free-written recall: save it, then show them what they missed.
 
-
-def handle_reflection_callback(user_id: int, chat_id: int, msg_id: int,
-                               callback_id: str, data: str):
-    """Concept taps and Done for the weekly reflection.
-
-    Picks are written straight to the database on every tap, so the flow
-    survives a bot restart mid-reflection.
+    The raw text is saved before classification runs, so a slow or failing LLM
+    can never cost a student the answer they just typed.
     """
-    # data looks like refl_<week>_c<index> or refl_<week>_done
-    _, week_part, action = data.split("_", 2)
-    week = int(week_part)
     course_id = db.get_student_course_id(user_id)
-    concepts = reflections.week_concepts(course_id, week)
+    recall = text.strip()
 
-    if action.startswith("c"):
-        concept = concepts[int(action[1:])]
-        current = (db.get_reflection(user_id, course_id, week) or {}).get("concepts", [])
-        if concept not in current and len(current) >= MAX_REFLECTION_PICKS:
-            answer_callback(callback_id, f"Pick at most {MAX_REFLECTION_PICKS}. Tap one to unselect.", show_alert=True)
-            return
+    db.save_reflection_recall(user_id, course_id, week, recall)
 
-        selected = db.toggle_reflection_concept(user_id, course_id, week, concept)
-        answer_callback(callback_id)
-        edit(chat_id, msg_id,
-             weekly_reflection_text(course_id, week),
-             reply_markup=reflection_keyboard(week, concepts, selected))
-        return
+    typing(chat_id)
+    try:
+        matched, unmatched, shaky = reflections.classify_recall(course_id, week, recall)
+        db.save_reflection_recall(user_id, course_id, week, recall, matched, unmatched, shaky)
+    except Exception:
+        # The answer is already saved; losing the analysis is a far smaller cost
+        # than leaving the student staring at silence after writing.
+        log.exception("Could not classify recall for user %s week %s", user_id, week)
+        matched = []
 
-    # ── Done: give the gap feedback, then ask the optional confusion ──────────
-    selected = (db.get_reflection(user_id, course_id, week) or {}).get("concepts", [])
-    if not selected:
-        answer_callback(callback_id, "Tap at least one concept first.", show_alert=True)
-        return
-    answer_callback(callback_id)
+    lines = [f"✅ Saved for week {week}."]
+    if matched:
+        lines.append(f"You covered: *{', '.join(matched)}*")
 
-    missed = [c for c in concepts if c not in selected]
-    lines = [f"✅ Noted for week {week}: *{', '.join(selected)}*"]
-    if missed:
-        # The whole point of picking: show what the week covered that they left out.
-        lines.append(f"This week also covered *{', '.join(missed[:3])}* — worth a second look.")
-    edit(chat_id, msg_id, "\n\n".join(lines))
+    # No "you also missed X" line: it only means something when the week's concept
+    # list is trustworthy, and today a syllabus PDF can yield a whole semester's
+    # topics. The classification still runs — the educator's coverage view needs
+    # it — but the student isn't shown a gap derived from it.
+    send(chat_id, "\n\n".join(lines))
 
     SESSIONS.setdefault(user_id, {"data": {}})
     SESSIONS[user_id]["state"] = STATES["WAIT_REFLECTION_CONFUSION"]
     SESSIONS[user_id]["reflection_week"] = week
-    send(chat_id,
-         "Anything still unclear? Type it below — your instructor sees it, and it "
-         "helps them decide what to revisit.",
-         reply_markup=inline_kb([[("Skip", f"reflskip_{week}_x")]]))
+    try:
+        question = reflections.followup_question(recall, matched)
+    except Exception:
+        log.exception("Follow-up generation failed for user %s", user_id)
+        question = reflections.DEFAULT_FOLLOWUP
+
+    send(chat_id, question, reply_markup=inline_kb([[("Skip", f"reflskip_{week}_x")]]))
 
 
 def handle_reflection_skip(user_id: int, chat_id: int, msg_id: int, callback_id: str, data: str):
@@ -1059,7 +1051,6 @@ def _broadcast_weekly_push(week: int, scheduled):
     db.clear_skipped_push_week(course_id)
 
     text = weekly_reflection_text(course_id, week)
-    keyboard = reflection_keyboard(week, concepts, [])
     students = db.list_students()
     sent = 0
 
@@ -1068,7 +1059,11 @@ def _broadcast_weekly_push(week: int, scheduled):
             # In private chats chat_id == user_id. Seed CHAT_USERS so send() can
             # log the message — on a cold start nothing has populated it yet.
             CHAT_USERS.setdefault(user_id, user_id)
-            response = send(user_id, text, reply_markup=keyboard)
+            response = send(user_id, text)
+            # The next thing they type is their recall, not a free-chat question.
+            SESSIONS.setdefault(user_id, {"data": {}})
+            SESSIONS[user_id]["state"] = STATES["WAIT_REFLECTION_RECALL"]
+            SESSIONS[user_id]["reflection_week"] = week
             if response.get("ok"):
                 sent += 1
             else:

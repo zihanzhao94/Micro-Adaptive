@@ -10,7 +10,11 @@ import os
 from langchain_openai import ChatOpenAI
 
 
-llm = ChatOpenAI(temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"))
+llm = ChatOpenAI(
+    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+    temperature=0,
+    openai_api_key=os.getenv("OPENAI_API_KEY"),
+)
 
 
 def _parse_json(raw_output: str, label: str) -> dict:

@@ -25,7 +25,11 @@ log = logging.getLogger(__name__)
 TOP_BLIND_SPOTS = 5
 MAX_FREE_QUESTIONS = 40
 
-_llm = ChatOpenAI(temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"))
+_llm = ChatOpenAI(
+    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+    temperature=0,
+    openai_api_key=os.getenv("OPENAI_API_KEY"),
+)
 
 
 def _student_free_questions(user_id: int) -> list[str]:

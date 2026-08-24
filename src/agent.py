@@ -36,7 +36,11 @@ of a function by taking small steps in the direction of the steepest slope (the 
 and it takes forever to get there. So, it's like adjusting your step size while hiking to ensure you reach the bottom efficiently."
 """
 
-llm = ChatOpenAI(temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"))  
+llm = ChatOpenAI(
+    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+    temperature=0,
+    openai_api_key=os.getenv("OPENAI_API_KEY"),
+)  
 
 #  ----quiz graph: ask a question, check answer, explain if wrong, message if correct ----
 # free chat function to answer student questions based on their learning style 
