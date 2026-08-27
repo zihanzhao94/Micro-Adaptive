@@ -1,5 +1,6 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { MessageSquareQuote } from 'lucide-react';
 import styles from '../dashboard.module.css';
 
@@ -26,10 +27,21 @@ interface Misconception {
   text: string;
 }
 
+interface StudentOption {
+  id: string;
+  name: string;
+}
+
+interface Finding {
+  label: string;
+  text: string;
+}
+
 interface ClassAnalysis {
-  summary: string;
+  findings: Finding[];
   highlights: string[];
   responded: number;
+  tooFew: boolean;
 }
 
 interface ReflectionsResponse {
@@ -50,11 +62,16 @@ const EMPTY: ReflectionsResponse = {
   concepts: [], confusions: [], unmatched: [], misconceptions: [], analysis: null, note: '',
 };
 
-export default function ReflectionsPage() {
+function ReflectionsView() {
   const [data, setData] = useState<ReflectionsResponse>(EMPTY);
   const [week, setWeek] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
+  const [students, setStudents] = useState<StudentOption[]>([]);
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  // Coming back from a student keeps whichever week was being looked at.
+  const initialWeek = searchParams.get('week');
 
   const load = useCallback(async (requestedWeek: number | null) => {
     setLoading(true);
@@ -73,7 +90,17 @@ export default function ReflectionsPage() {
     }
   }, []);
 
-  useEffect(() => { load(null); }, [load]);
+  useEffect(() => {
+    load(initialWeek === null ? null : Number(initialWeek));
+  }, [load, initialWeek]);
+
+  useEffect(() => {
+    // Only for the picker — the class analysis on this page never needs it.
+    fetch(`${API_BASE}/students`)
+      .then(response => (response.ok ? response.json() : { students: [] }))
+      .then(body => setStudents(body.students ?? []))
+      .catch(() => setStudents([]));
+  }, []);
 
   const responseRate = data.totalStudents
     ? Math.round((data.respondedCount / data.totalStudents) * 100)
@@ -91,8 +118,28 @@ export default function ReflectionsPage() {
               : `Week ${data.week} · ${data.respondedCount}/${data.totalStudents} replied (${responseRate}%)`}
           </div>
         </div>
-        {data.availableWeeks.length > 0 && (
-          <div className={styles.topBarRight}>
+        <div className={styles.topBarRight} style={{ display: 'flex', gap: '8px' }}>
+          {students.length > 0 && (
+            <select
+              id="studentFilter"
+              className="form-input"
+              style={{ width: 'auto', fontSize: '13px' }}
+              value=""
+              onChange={event => {
+                // Carries the chosen week through, so picking a student narrows
+                // rather than resetting what the educator was already looking at.
+                const suffix = week === null ? '' : `?week=${week}`;
+                router.push(`/dashboard/student/${event.target.value}${suffix}`);
+              }}
+            >
+              <option value="">All students</option>
+              {students.map(student => (
+                <option key={student.id} value={student.id}>{student.name}</option>
+              ))}
+            </select>
+          )}
+
+          {data.availableWeeks.length > 0 && (
             <select
               id="weekFilter"
               className="form-input"
@@ -102,8 +149,8 @@ export default function ReflectionsPage() {
             >
               {data.availableWeeks.map(w => <option key={w} value={w}>Week {w}</option>)}
             </select>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       <div className={styles.pageContent}>
@@ -121,7 +168,7 @@ export default function ReflectionsPage() {
 
         {data.week !== null && (
           <>
-            {data.analysis && (data.analysis.summary || data.analysis.highlights.length > 0) && (
+            {data.analysis && (data.analysis.findings.length > 0 || data.analysis.highlights.length > 0 || data.analysis.tooFew) && (
               <div className="card" style={{ marginBottom: '16px', borderLeft: '3px solid var(--primary)' }}>
                 <div style={{ fontSize: '14px', fontWeight: 700, marginBottom: '10px' }}>
                   This week, in short
@@ -133,11 +180,25 @@ export default function ReflectionsPage() {
                   </div>
                 ))}
 
-                {data.analysis.summary && (
-                  <div style={{ fontSize: '13px', lineHeight: 1.7, marginTop: '10px' }}>
-                    {data.analysis.summary}
+                {data.analysis.tooFew && (
+                  <div style={{ fontSize: '13px', color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                    {data.analysis.responded === 0
+                      ? 'No replies yet this week.'
+                      : `Only ${data.analysis.responded} ${data.analysis.responded === 1 ? 'reply' : 'replies'} so far — too few to read as a class pattern. Individual answers are below.`}
                   </div>
                 )}
+
+                {data.analysis.findings.map(finding => (
+                  <div key={finding.label} style={{ marginTop: '14px' }}>
+                    <div style={{
+                      fontSize: '10px', letterSpacing: '0.08em', textTransform: 'uppercase',
+                      color: 'var(--primary-light)', fontWeight: 700, marginBottom: '4px',
+                    }}>
+                      {finding.label}
+                    </div>
+                    <div style={{ fontSize: '13px', lineHeight: 1.7 }}>{finding.text}</div>
+                  </div>
+                ))}
               </div>
             )}
 
@@ -203,7 +264,7 @@ export default function ReflectionsPage() {
             {data.unmatched.length > 0 && (
               <div className="card" style={{ marginTop: '16px' }}>
                 <div style={{ fontSize: '14px', fontWeight: 700, marginBottom: '4px' }}>
-                  Mentioned but not in your concept list ({data.unmatched.length})
+                  Mentioned but not in this week's concepts ({data.unmatched.length})
                 </div>
                 <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '14px' }}>
                   Students wrote about these, but they match none of week {data.week}&apos;s
@@ -273,5 +334,14 @@ export default function ReflectionsPage() {
         )}
       </div>
     </>
+  );
+}
+
+
+export default function ReflectionsPage() {
+  return (
+    <Suspense fallback={null}>
+      <ReflectionsView />
+    </Suspense>
   );
 }

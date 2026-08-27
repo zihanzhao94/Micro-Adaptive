@@ -1,27 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useCallback, useEffect, useState } from 'react';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, TrendingUp } from 'lucide-react';
-import {
-  RadarChart, Radar, PolarGrid, PolarAngleAxis, ResponsiveContainer, Tooltip
-} from 'recharts';
+import { ArrowLeft } from 'lucide-react';
 import styles from '../../dashboard.module.css';
 import studentStyles from './student.module.css';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://127.0.0.1:8000';
-
-type MasteryItem = {
-  concept: string;
-  score: number;
-};
-
-type HistoryItem = {
-  type: string;
-  text: string;
-  time: string;
-};
 
 type Student = {
   id: string;
@@ -30,17 +16,28 @@ type Student = {
   telegramId: string;
   learningStyle: string;
   interests: string[];
-  avgMastery: number;
-  quizzesDone: number;
-  mastery: MasteryItem[];
-  history: HistoryItem[];
 };
 
-function getMasteryColor(score: number) {
-  if (score >= 80) return '#10b981';
-  if (score >= 60) return '#f59e0b';
-  return '#ef4444';
-}
+type StudentOption = { id: string; name: string };
+type ConceptCount = { name: string; count: number };
+type Finding = { label: string; text: string };
+type StudentConfusion = { week: number; text: string };
+
+type StudentReflections = {
+  studentName: string;
+  week: number | null;
+  answeredWeeks: number[];
+  weeksAnswered: number;
+  concepts: ConceptCount[];
+  neverRecalled: string[];
+  confusions: StudentConfusion[];
+  analysis: {
+    findings: Finding[];
+    highlights: string[];
+    responded: number;
+    tooFew: boolean;
+  };
+};
 
 function initials(name: string) {
   return name.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase();
@@ -48,17 +45,39 @@ function initials(name: string) {
 
 export default function StudentDetailPage() {
   const params = useParams<{ id: string }>();
+  const searchParams = useSearchParams();
+  // Arriving from the reflections page carries the week already being viewed.
+  const initialWeek = searchParams.get('week');
   const [student, setStudent] = useState<Student | null>(null);
+  const [data, setData] = useState<StudentReflections | null>(null);
+  const [week, setWeek] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
+  const [students, setStudents] = useState<StudentOption[]>([]);
+  const router = useRouter();
+
+  // Null week means the whole term; a number narrows to that week. The endpoint
+  // takes the same shape either way, so the page doesn't branch on it.
+  const loadReflections = useCallback(async (requestedWeek: number | null) => {
+    try {
+      const query = requestedWeek === null ? '' : `?week=${requestedWeek}`;
+      const response = await fetch(`${API_BASE}/students/${params.id}/reflections${query}`);
+      if (!response.ok) throw new Error('Could not load this student\u2019s reflections.');
+      setData(await response.json());
+      setWeek(requestedWeek);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Could not load reflections.');
+    }
+  }, [params.id]);
 
   useEffect(() => {
-    const loadStudent = async () => {
+    const load = async () => {
       try {
         const response = await fetch(`${API_BASE}/students/${params.id}`);
         if (!response.ok) throw new Error('Could not load student.');
         const body: { student: Student } = await response.json();
         setStudent(body.student);
+        await loadReflections(initialWeek === null ? null : Number(initialWeek));
       } catch (error) {
         setMessage(error instanceof Error ? error.message : 'Could not load student.');
       } finally {
@@ -66,8 +85,15 @@ export default function StudentDetailPage() {
       }
     };
 
-    loadStudent();
-  }, [params.id]);
+    load();
+  }, [params.id, loadReflections, initialWeek]);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/students`)
+      .then(response => (response.ok ? response.json() : { students: [] }))
+      .then(body => setStudents(body.students ?? []))
+      .catch(() => setStudents([]));
+  }, []);
 
   if (loading) {
     return (
@@ -102,6 +128,45 @@ export default function StudentDetailPage() {
             <div className={styles.topBarDate}>{student.email || 'No email'} · {student.telegramId}</div>
           </div>
         </div>
+
+        <div className={styles.topBarRight} style={{ display: 'flex', gap: '8px' }}>
+          {students.length > 0 && (
+            <select
+              id="studentFilter"
+              className="form-input"
+              style={{ width: 'auto', fontSize: '13px' }}
+              value={params.id}
+              onChange={event => {
+                const suffix = week === null ? '' : `?week=${week}`;
+                router.push(
+                  event.target.value === ''
+                    ? `/dashboard/reflections${suffix}`
+                    : `/dashboard/student/${event.target.value}${suffix}`
+                );
+              }}
+            >
+              <option value="">All students</option>
+              {students.map(option => (
+                <option key={option.id} value={option.id}>{option.name}</option>
+              ))}
+            </select>
+          )}
+
+          {data && data.answeredWeeks.length > 0 && (
+            <select
+              id="studentWeekFilter"
+              className="form-input"
+              style={{ width: 'auto', fontSize: '13px' }}
+              value={week ?? ''}
+              onChange={event =>
+                loadReflections(event.target.value === '' ? null : Number(event.target.value))
+              }
+            >
+              <option value="">All weeks</option>
+              {data.answeredWeeks.map(w => <option key={w} value={w}>Week {w}</option>)}
+            </select>
+          )}
+        </div>
       </div>
 
       <div className={styles.pageContent}>
@@ -126,9 +191,8 @@ export default function StudentDetailPage() {
 
               <div className={studentStyles.statsRow}>
                 {[
-                  { label: 'Avg Mastery', value: `${student.avgMastery}%`, color: getMasteryColor(student.avgMastery) },
-                  { label: 'Quizzes Done', value: String(student.quizzesDone), color: 'var(--primary-light)' },
-                  { label: 'Student ID', value: student.id, color: 'var(--text-secondary)' },
+                  { label: 'Weeks answered', value: String(data?.weeksAnswered ?? 0), color: 'var(--primary-light)' },
+                  { label: 'Things flagged', value: String(data?.confusions.length ?? 0), color: 'var(--text-secondary)' },
                 ].map(stat => (
                   <div key={stat.label} className={studentStyles.statItem}>
                     <div className={studentStyles.statVal} style={{ color: stat.color }}>{stat.value}</div>
@@ -138,86 +202,107 @@ export default function StudentDetailPage() {
               </div>
             </div>
 
-            <div className="card">
-              <div className="section-header" style={{ marginBottom: '8px' }}>
-                <div className="section-title" style={{ fontSize: '15px' }}>Concept Mastery Radar</div>
+            {data && (data.analysis.findings.length > 0 || data.analysis.tooFew) && (
+              <div className="card" style={{ borderLeft: '3px solid var(--primary)' }}>
+                <div style={{ fontSize: '14px', fontWeight: 700, marginBottom: '10px' }}>
+                  {week === null ? 'Across the term' : `Week ${week}`}
+                </div>
+
+                {data.analysis.highlights.map(line => (
+                  <div key={line} style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                    · {line}
+                  </div>
+                ))}
+
+                {data.analysis.tooFew ? (
+                  <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '8px' }}>
+                    This student hasn&apos;t answered a reflection {week === null ? 'yet' : 'that week'}.
+                  </div>
+                ) : data.analysis.findings.map(finding => (
+                  <div key={finding.label} style={{ marginTop: '14px' }}>
+                    <div style={{
+                      fontSize: '10px', letterSpacing: '0.08em', textTransform: 'uppercase',
+                      color: 'var(--primary-light)', fontWeight: 700, marginBottom: '4px',
+                    }}>
+                      {finding.label}
+                    </div>
+                    <div style={{ fontSize: '13px', lineHeight: 1.7 }}>{finding.text}</div>
+                  </div>
+                ))}
               </div>
-              {student.mastery.length > 0 ? (
-                <ResponsiveContainer width="100%" height={220}>
-                  <RadarChart data={student.mastery}>
-                    <PolarGrid stroke="var(--border)" />
-                    <PolarAngleAxis dataKey="concept" tick={{ fill: 'var(--text-muted)', fontSize: 11 }} />
-                    <Radar dataKey="score" stroke="#6366f1" fill="#6366f1" fillOpacity={0.2} />
-                    <Tooltip
-                      contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
-                      formatter={(v) => [`${Number(v ?? 0)}%`, 'Mastery']}
-                    />
-                  </RadarChart>
-                </ResponsiveContainer>
-              ) : (
-                <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>No mastery data yet.</div>
-              )}
-            </div>
+            )}
           </div>
 
-          <div>
-            <div className="card" style={{ height: '100%' }}>
-              <div className="section-header">
-                <div>
-                  <div className="section-title">Learning History</div>
-                  <div className="section-subtitle">Recent interactions and quiz results</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {data && data.confusions.length > 0 && (
+              <div className="card">
+                <div style={{ fontSize: '14px', fontWeight: 700, marginBottom: '4px' }}>
+                  What they said they were unsure about
                 </div>
-              </div>
-
-              <div className={studentStyles.timeline}>
-                {student.history.map((item, index) => (
-                  <div key={`${item.text}-${index}`} className={studentStyles.timelineItem}>
-                    <div className={studentStyles.timelineIcon}>{item.type === 'quiz' ? 'Q' : 'A'}</div>
-                    <div className={studentStyles.timelineContent}>
-                      <div className={studentStyles.timelineText}>{item.text}</div>
-                      <div className={studentStyles.timelineTime}>{item.time}</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '16px' }}>
+                  In their own words, week by week.
+                </div>
+                {data.confusions.map(confusion => (
+                  <div
+                    key={`${confusion.week}-${confusion.text}`}
+                    style={{ borderLeft: '2px solid var(--primary)', paddingLeft: '12px', marginBottom: '14px' }}
+                  >
+                    <div style={{ fontSize: '13px', lineHeight: 1.6 }}>{confusion.text}</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                      Week {confusion.week}
                     </div>
                   </div>
                 ))}
-                {student.history.length === 0 && (
-                  <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>No activity yet.</div>
-                )}
               </div>
-            </div>
-          </div>
-        </div>
+            )}
 
-        <div className="card" style={{ marginTop: '16px' }}>
-          <div className="section-header">
-            <div>
-              <div className="section-title">Concept-by-Concept Mastery</div>
-              <div className="section-subtitle">Detailed breakdown</div>
-            </div>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-            {student.mastery.map(item => (
-              <div key={item.concept}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-                  <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>{item.concept}</span>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <TrendingUp size={12} style={{ color: getMasteryColor(item.score) }} />
-                    <span style={{ fontSize: '13px', fontWeight: 700, color: getMasteryColor(item.score) }}>{item.score}%</span>
-                  </div>
+            {data && data.concepts.length > 0 && (
+              <div className="card">
+                <div style={{ fontSize: '14px', fontWeight: 700, marginBottom: '4px' }}>
+                  Concepts they recalled
                 </div>
-                <div style={{ height: '8px', background: 'var(--bg-elevated)', borderRadius: '4px', overflow: 'hidden' }}>
-                  <div style={{
-                    height: '100%',
-                    width: `${item.score}%`,
-                    background: getMasteryColor(item.score),
-                    borderRadius: '4px',
-                    transition: 'width 0.8s ease',
-                    boxShadow: `0 0 8px ${getMasteryColor(item.score)}50`,
-                  }} />
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '16px' }}>
+                  How often each came up across the weeks they answered.
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                  {data.concepts.map(concept => (
+                    <span key={concept.name} style={{
+                      display: 'inline-flex', alignItems: 'center', gap: '6px',
+                      fontSize: '12px', padding: '4px 9px', borderRadius: '4px',
+                      background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+                    }}>
+                      {concept.name}
+                      {concept.count > 1 && (
+                        <span style={{ fontSize: '10px', color: 'var(--primary-light)', fontWeight: 700 }}>
+                          ×{concept.count}
+                        </span>
+                      )}
+                    </span>
+                  ))}
                 </div>
               </div>
-            ))}
-            {student.mastery.length === 0 && (
-              <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>No concept mastery has been recorded yet.</div>
+            )}
+
+            {data && data.neverRecalled.length > 0 && (
+              <div className="card">
+                <div style={{ fontSize: '14px', fontWeight: 700, marginBottom: '4px' }}>
+                  Not mentioned ({data.neverRecalled.length})
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '16px' }}>
+                  Taught in the weeks this student answered, but never came up in what they wrote.
+                  Weeks they skipped are excluded — there is no evidence either way for those.
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                  {data.neverRecalled.map(name => (
+                    <span key={name} style={{
+                      fontSize: '12px', padding: '4px 9px', borderRadius: '4px',
+                      border: '1px solid var(--border)', color: 'var(--text-muted)',
+                    }}>
+                      {name}
+                    </span>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
         </div>

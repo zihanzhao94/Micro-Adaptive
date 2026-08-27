@@ -490,3 +490,58 @@ generate_activity
 - 班级层面的质性归纳，生成 comment 给老师
 - Presentation：Intro / Motivation / Literature / System / Demo + 录像
 - 核心难题未解：**学生凭什么主动用，主动 interact 有阻力**
+
+---
+
+## 2026-08-27 — 按学生看反思
+
+### 背景
+导师看过班级视图后提出：
+
+> analyze it for each week (for all students) **and analyze for each student over multiple weeks (or a single week)**
+> maybe in future can also allow the users to "filter" by selected weeks/student(s)
+
+第一项已经有了（反思页就是"某周 × 全班"），缺的是**按学生**这个维度。
+
+顺带解决了一个存在很久的问题：`/dashboard/student/[id]` 和 students 列表页**整页都是空的** —— 它们完全依赖 `mastery` 和 `quiz_results` 两张表，而没人做过练习题，所以点进任何学生都显示 "No mastery data yet"，列表页三个统计卡片全是 0，所有学生被标成 "Struggling"。把反思数据接进去，正好一举两得。
+
+### 做了什么
+
+**1. `student_analysis()`（`reflections.py`）**
+
+和 `class_analysis()` 平级，但**提示词完全重写**。班级视角问的是"全班哪里没听懂"，单个学生要问的是"这个人的理解停在什么层次、跨周有没有变化"。提示词里明确禁止用 "students" 或 "the class"，也禁止在只有一两周数据时声称趋势。
+
+数据层没动 —— `list_reflections()` 早就支持 `user_id` 和 `week_no` 过滤，`week_no=None` 就是跨周、传了就是单周，正好覆盖导师说的两种情况。
+
+**没有复用 `revision.py` 的 `rank_blind_spots()`**：它的打分用到了学生的自由聊天记录，而那是早先定下的隐私边界 —— 自由提问只进学生自己的 `/revise`，不进老师端。`build_confusions()` 更不能调，它有副作用会写入 RAG 答案。
+
+**2. "从未提及"只算学生答过的周**
+
+第一版列出了全部课程概念。但学生缺席的那周不算"没想起来"，是**根本没有数据** —— 混在一起会让缺口看起来大得多。
+
+**3. 分析结果加缓存**
+
+`GET /reflections` 之前**每次打开都调一次 LLM**。加了按学生的视图后会翻倍，而且老师刷新两次可能看到措辞不同的结论 —— 这会直接侵蚀他对结论的信任。
+
+按输入内容哈希做 key，有新回复时哈希自然变化、自动失效，不需要手动清。实测第二次请求 0.01 秒，措辞完全一致。
+
+**4. 两个页面共用同一组筛选器**
+
+反思页和学生页顶部都是 `[All students ▾] [Week N ▾]`，切换时通过 `?week=` 带着当前周次走。第一版只在反思页放了学生下拉，结果**回到班级视图只能点左上角的 Back**，很难找。
+
+**5. students 列表改成参与度口径**
+
+三个统计卡片和筛选按钮原本全按 `avgMastery` 算，换成参与周数、有困惑的学生数，筛选改成 Replies often / Rarely replies。统计用**一条聚合 SQL** 拿到所有学生的数据 —— 这个列表页本来每行就要跑好几次查询，不能再往里加。
+
+### 踩的坑
+- **`useSearchParams()` 需要 Suspense 边界**，否则反思页静态预渲染时构建失败。学生页因为是动态路由 `[id]` 没暴露这个问题。
+- 用 sed/脚本改前端时，有一处锚点已经不存在（`note` 那段之前删了），替换**静默失败**，直到 tsc 报 `Cannot find name` 才发现。批量改写必须带 assert。
+
+### 设计决策
+- **数数字的事不交给 LLM**：召回次数、占比、"N of M concepts went unmentioned"、参与周数全是计算出来的。只有"这些人的描述停在什么层次"这种判断才用模型。又便宜又稳定，同样的数据不会两次给出不同结果。
+- **老师端不返回学生原话**：接口里没有 `recallText`，也没有任何聊天记录。老师看到的是分析和概念图景，不是逐字记录。
+
+### 待办
+- **多选筛选**（导师说的 "selected weeks/student(s)" 里的复数）—— 需要引入 multi-select 组件，dashboard 里现在一个都没有，后端分析函数也要支持周次列表。他说的是 "in future"，暂缓。
+- 跨周视图目前看不出效果：14 个模拟学生都只有 week 3 的数据。
+- **模拟数据必须在报告里标注 simulated**。

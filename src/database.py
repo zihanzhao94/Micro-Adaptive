@@ -828,6 +828,34 @@ def list_reflections(
     } for row in rows]
 
 
+def reflection_stats_by_student(course_id: str | None = None) -> dict[int, dict]:
+    """Participation per student, in one query.
+
+    The students list needs this for every row at once; going through
+    list_reflections() per student would issue a query each and the page already
+    runs several per student.
+    """
+    init_db()
+    course_id = course_id or get_active_course_id()
+    with _connect() as conn:
+        rows = conn.execute("""
+            SELECT user_id,
+                   COUNT(*) AS weeks_answered,
+                   SUM(CASE WHEN TRIM(COALESCE(confusion, '')) != '' THEN 1 ELSE 0 END) AS confusions
+            FROM reflections
+            WHERE course_id = ?
+            GROUP BY user_id
+        """, (course_id,)).fetchall()
+
+    return {
+        row["user_id"]: {
+            "weeksAnswered": row["weeks_answered"],
+            "confusions": row["confusions"] or 0,
+        }
+        for row in rows
+    }
+
+
 def set_reflection_confusion_answer(user_id: int, course_id: str, week_no: int, answer: str) -> None:
     """Cache the RAG answer to a confusion so /revise doesn't regenerate it."""
     init_db()

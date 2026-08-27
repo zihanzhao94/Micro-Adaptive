@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { Search, Filter, TrendingUp, TrendingDown, Minus } from 'lucide-react';
+import { Search, Filter } from 'lucide-react';
 import styles from '../dashboard.module.css';
 import studentsStyles from './students.module.css';
 
@@ -12,23 +12,20 @@ type Student = {
   id: string;
   name: string;
   telegramId: string;
-  avgMastery: number;
-  quizzesDone: number;
-  weeklyActive: number;
-  trend: 'up' | 'down' | 'flat';
   learningStyle: string;
+  weeksAnswered: number;
+  confusions: number;
 };
 
-function getMasteryColor(score: number) {
-  if (score >= 75) return 'var(--success)';
-  if (score >= 55) return 'var(--warning)';
+// Participation against the weeks taught so far, not a mastery score: nothing
+// in the reflection loop grades a student, so the list says how much they have
+// taken part, and leaves judging the content to the student's own page.
+function participationColor(answered: number, weeksSoFar: number) {
+  if (!weeksSoFar) return 'var(--text-muted)';
+  const share = answered / weeksSoFar;
+  if (share >= 0.75) return 'var(--success)';
+  if (share >= 0.4) return 'var(--warning)';
   return 'var(--danger)';
-}
-
-function getMasteryLabel(score: number) {
-  if (score >= 75) return { text: 'On Track', cls: 'badge-success' };
-  if (score >= 55) return { text: 'Progressing', cls: 'badge-warning' };
-  return { text: 'Struggling', cls: 'badge-danger' };
 }
 
 function initials(name: string) {
@@ -38,7 +35,8 @@ function initials(name: string) {
 export default function StudentsPage() {
   const [students, setStudents] = useState<Student[]>([]);
   const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<'all' | 'struggling' | 'ontrack'>('all');
+  const [filter, setFilter] = useState<'all' | 'quiet' | 'active'>('all');
+  const [weeksSoFar, setWeeksSoFar] = useState(0);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
 
@@ -49,6 +47,14 @@ export default function StudentsPage() {
         if (!response.ok) throw new Error('Could not load students.');
         const body: { students: Student[] } = await response.json();
         setStudents(body.students);
+
+        // Participation is only meaningful against the weeks already taught —
+        // nobody can have answered for a week that hasn't happened.
+        const summary = await fetch(`${API_BASE}/dashboard/summary`);
+        if (summary.ok) {
+          const { currentWeek } = await summary.json();
+          setWeeksSoFar(currentWeek ?? 0);
+        }
       } catch (error) {
         setMessage(error instanceof Error ? error.message : 'Could not load students.');
       } finally {
@@ -62,14 +68,15 @@ export default function StudentsPage() {
   const filtered = students.filter(s => {
     const matchSearch = s.name.toLowerCase().includes(search.toLowerCase()) ||
       s.telegramId.toLowerCase().includes(search.toLowerCase());
+    const share = weeksSoFar ? s.weeksAnswered / weeksSoFar : 0;
     const matchFilter = filter === 'all'
-      ? true : filter === 'struggling'
-        ? s.avgMastery < 55 : s.avgMastery >= 75;
+      ? true : filter === 'quiet'
+        ? share < 0.4 : share >= 0.75;
     return matchSearch && matchFilter;
   });
 
-  const struggling = students.filter(s => s.avgMastery < 55).length;
-  const onTrack = students.filter(s => s.avgMastery >= 75).length;
+  const quiet = students.filter(s => !weeksSoFar || s.weeksAnswered / weeksSoFar < 0.4).length;
+  const answeredAny = students.filter(s => s.weeksAnswered > 0).length;
 
   return (
     <>
@@ -89,9 +96,9 @@ export default function StudentsPage() {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '14px', marginBottom: '24px' }}>
           {[
-            { label: 'Total Enrolled', value: students.length.toString(), color: 'var(--primary-light)' },
-            { label: 'On Track (>=75%)', value: onTrack.toString(), color: 'var(--success)' },
-            { label: 'Struggling (<55%)', value: struggling.toString(), color: 'var(--danger)' },
+            { label: 'Enrolled', value: students.length.toString(), color: 'var(--primary-light)' },
+            { label: 'Have reflected', value: answeredAny.toString(), color: 'var(--success)' },
+            { label: 'Rarely reply', value: quiet.toString(), color: 'var(--warning)' },
           ].map(s => (
             <div key={s.label} className="stat-card" style={{ padding: '16px 20px' }}>
               <div className={styles.statValue} style={{ fontSize: '22px', color: s.color }}>
@@ -116,7 +123,7 @@ export default function StudentsPage() {
             />
           </div>
           <div style={{ display: 'flex', gap: '6px' }}>
-            {(['all', 'ontrack', 'struggling'] as const).map(f => (
+            {(['all', 'active', 'quiet'] as const).map(f => (
               <button
                 key={f}
                 id={`filter-${f}`}
@@ -124,7 +131,7 @@ export default function StudentsPage() {
                 onClick={() => setFilter(f)}
               >
                 <Filter size={13} />
-                {f === 'all' ? 'All' : f === 'ontrack' ? 'On Track' : 'Struggling'}
+                {f === 'all' ? 'All' : f === 'active' ? 'Replies often' : 'Rarely replies'}
               </button>
             ))}
           </div>
@@ -133,15 +140,13 @@ export default function StudentsPage() {
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
           <div className={studentsStyles.tableHeader}>
             <span>Student</span>
-            <span>Avg Mastery</span>
-            <span>Quizzes</span>
+            <span>Weeks answered</span>
+            <span>Flagged</span>
             <span>Style</span>
-            <span>Active/Week</span>
-            <span>Status</span>
           </div>
 
           {filtered.map(student => {
-            const status = getMasteryLabel(student.avgMastery);
+            const colour = participationColor(student.weeksAnswered, weeksSoFar);
             return (
               <Link
                 key={student.id}
@@ -150,7 +155,7 @@ export default function StudentsPage() {
                 className={studentsStyles.tableRow}
               >
                 <div className={studentsStyles.studentCell}>
-                  <div className={studentsStyles.avatar} style={{ background: getMasteryColor(student.avgMastery) + '22', color: getMasteryColor(student.avgMastery) }}>
+                  <div className={studentsStyles.avatar} style={{ background: colour + '22', color: colour }}>
                     {initials(student.name)}
                   </div>
                   <div>
@@ -159,33 +164,25 @@ export default function StudentsPage() {
                   </div>
                 </div>
 
-                <div className={studentsStyles.masteryCell}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <div style={{ flex: 1, height: 6, background: 'var(--bg-elevated)', borderRadius: 3, overflow: 'hidden', minWidth: 80 }}>
-                      <div style={{ height: '100%', width: `${student.avgMastery}%`, background: getMasteryColor(student.avgMastery), borderRadius: 3 }} />
-                    </div>
-                    <span style={{ fontSize: '13px', fontWeight: 700, color: getMasteryColor(student.avgMastery), minWidth: '34px' }}>
-                      {student.avgMastery}%
-                    </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div style={{ flex: 1, height: 6, background: 'var(--bg-elevated)', borderRadius: 3, overflow: 'hidden', minWidth: 60 }}>
+                    <div style={{
+                      height: '100%',
+                      width: `${weeksSoFar ? (student.weeksAnswered / weeksSoFar) * 100 : 0}%`,
+                      background: colour,
+                      borderRadius: 3,
+                    }} />
                   </div>
-                </div>
-
-                <span style={{ fontSize: '13px', color: 'var(--text-secondary)', fontWeight: 600 }}>
-                  {student.quizzesDone}
-                </span>
-
-                <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{student.learningStyle}</span>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  {student.trend === 'up' && <TrendingUp size={13} style={{ color: 'var(--success)' }} />}
-                  {student.trend === 'down' && <TrendingDown size={13} style={{ color: 'var(--danger)' }} />}
-                  {student.trend === 'flat' && <Minus size={13} style={{ color: 'var(--text-muted)' }} />}
-                  <span style={{ fontSize: '12px', color: student.weeklyActive >= 5 ? 'var(--success)' : student.weeklyActive >= 3 ? 'var(--warning)' : 'var(--danger)', fontWeight: 600 }}>
-                    {student.weeklyActive}/7
+                  <span style={{ fontSize: '13px', fontWeight: 700, color: colour, minWidth: '34px' }}>
+                    {student.weeksAnswered}/{weeksSoFar || '—'}
                   </span>
                 </div>
 
-                <span className={`badge ${status.cls}`}>{status.text}</span>
+                <span style={{ fontSize: '13px', color: 'var(--text-secondary)', fontWeight: 600 }}>
+                  {student.confusions}
+                </span>
+
+                <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{student.learningStyle}</span>
               </Link>
             );
           })}

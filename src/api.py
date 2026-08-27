@@ -168,11 +168,17 @@ def _student_payload(user_id: int, student: dict) -> dict:
 
 
 def _all_students() -> list[dict]:
-    return [
-        _student_payload(user_id, student)
-        for user_id, student in db.list_students()
-        if student
-    ]
+    # One aggregate query for the whole list rather than a per-student lookup:
+    # this payload already costs several queries per row.
+    stats = db.reflection_stats_by_student()
+    students = []
+    for user_id, student in db.list_students():
+        if not student:
+            continue
+        payload = _student_payload(user_id, student)
+        payload.update(stats.get(user_id, {"weeksAnswered": 0, "confusions": 0}))
+        students.append(payload)
+    return students
 
 
 def _concept_mastery(students: list[dict]) -> list[dict]:
@@ -628,7 +634,7 @@ def get_reflections(
             "unmatched": [],
             "misconceptions": [],
             "note": "",
-            "analysis": {"summary": "", "highlights": [], "responded": 0},
+            "analysis": {"findings": [], "highlights": [], "responded": 0, "tooFew": True},
         }
 
     # Named week_entries, not reflections: a local called `reflections` shadows
@@ -707,6 +713,46 @@ def get_student(student_id: int):
     if not student or not student.get("registered"):
         raise HTTPException(status_code=404, detail="Student not found.")
     return {"student": _student_payload(student_id, student)}
+
+
+@app.get("/students/{student_id}/reflections")
+def get_student_reflections(
+    student_id: int,
+    week: int | None = Query(default=None),
+    course_id: str | None = Query(default=None),
+):
+    """One student's reflections — all weeks, or a single week with ?week=.
+
+    Deliberately returns no free-chat history and no verbatim recall text: the
+    instructor gets the analysis and the concept picture, not a transcript.
+    """
+    active_course_id = course_id or db.get_active_course_id()
+    student = db.get_student(student_id)
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student not found.")
+
+    analysis = reflections.student_analysis(active_course_id, student_id, week)
+    all_weeks = sorted(
+        {item["week"] for item in db.list_reflections(active_course_id, user_id=student_id)},
+        reverse=True,
+    )
+
+    return {
+        "studentId": str(student_id),
+        "studentName": student.get("name") or f"Student {student_id}",
+        "week": week,
+        "answeredWeeks": all_weeks,
+        "weeksAnswered": analysis["responded"],
+        "concepts": analysis["concepts"],
+        "neverRecalled": analysis["neverRecalled"],
+        "confusions": analysis["confusions"],
+        "analysis": {
+            "findings": analysis["findings"],
+            "highlights": analysis["highlights"],
+            "responded": analysis["responded"],
+            "tooFew": analysis["tooFew"],
+        },
+    }
 
 
 @app.get("/dashboard/summary")

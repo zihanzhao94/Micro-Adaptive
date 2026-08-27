@@ -1,6 +1,6 @@
 .tableHeader {
   display: grid;
-  grid-template-columns: 2fr 1.5fr 80px 120px 150px 100px;
+  grid-template-columns: 2fr 1.5fr 80px 120px;
   gap: 12px;
   padding: 12px 20px;
   font-size: 10px;
@@ -13,7 +13,7 @@
 
 .tableRow {
   display: grid;
-  grid-template-columns: 2fr 1.5fr 80px 120px 150px 100px;
+  grid-template-columns: 2fr 1.5fr 80px 120px;
   gap: 12px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--border);
