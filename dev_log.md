@@ -545,3 +545,48 @@ generate_activity
 - **多选筛选**（导师说的 "selected weeks/student(s)" 里的复数）—— 需要引入 multi-select 组件，dashboard 里现在一个都没有，后端分析函数也要支持周次列表。他说的是 "in future"，暂缓。
 - 跨周视图目前看不出效果：14 个模拟学生都只有 week 3 的数据。
 - **模拟数据必须在报告里标注 simulated**。
+
+---
+
+## 2026-09-11 — 反思输入校验与非锚定式困惑追问
+
+### 背景
+
+开放式反思原先将少于 15 个字符的回答全部丢弃。这能拦住 `aa`、`I forgot`
+之类无效输入，但也会误删 `SDLC`、`Use Cases`、`需求分析` 等真实课程概念。
+另外，原有 follow-up 让 LLM 从 matched concepts 中挑一个追问，会替学生预先选定
+“应该不确定的概念”，产生锚定偏差。
+
+### 做了什么
+
+**1. 用明确无效规则取代固定长度门槛**
+
+- 删除 `MIN_RECALL_CHARS = 15`。
+- 输入先做 Unicode-safe 归一化，去除标点并压缩空白。
+- 只在能确定无效时短路返回：空白、纯符号、重复字符、明确的无回答表达，
+  以及未对应课程概念的两字母英文片段。
+- 在过滤前检查教师确认的概念名和缩写，因此 `AI`、`SDLC` 等短概念仍可进入
+  语义分类。
+- 分类 prompt 明确要求随机字符、重复字符和测试输入不能被当成 unmatched topic。
+
+**2. uncertainty 追问改成学生自主选择**
+
+- matched concepts 只表示“学生提到了什么”，不再被当成“学生不确定什么”的证据。
+- 取消 LLM 从 matched list 中选一个概念生成问题的步骤。
+- 改为稳定的整周视角问题：
+  `Looking across the ideas you recalled—or anything else from this week—which part would be hardest to explain without notes, and why?`
+- 学生可以从已回忆的多个概念中选择，也可以提出 matched 之外的本周困惑。
+
+**3. 回归测试**
+
+- 新增 `evaluation/test_reflection_input_validation.py`，覆盖明确噪声和中英文短概念。
+- 新增 `evaluation/test_reflection_followup.py`，确认多个 matched concepts 不会让问题锚定到其中一个。
+- 6 项相关 unittest 全部通过；6 项 core system checks 全部通过。
+
+### 设计决定
+
+- **长度不是语义质量的代理指标**：只拦截确定噪声，把其余内容交给语义分类。
+- **recall 与 uncertainty 是两种不同信号**：模型可以识别学生提到的概念，但不应替学生
+  决定哪个概念最不确定。
+- **固定追问比生成式追问更符合这一步的目标**：它降低锚定、延迟、调用成本和生成失败，
+  同时保留“学生自己指出 gap”这个核心信号。
