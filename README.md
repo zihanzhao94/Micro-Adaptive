@@ -6,6 +6,70 @@ with an AI tutor through Telegram. The tutor uses RAG, student memory, mastery
 tracking, and LangGraph activity orchestration to generate adaptive quizzes,
 coding/design tasks, diagram prompts, and feedback.
 
+## Architecture
+
+```mermaid
+flowchart TB
+    educator([Educator])
+    student([Student])
+
+    subgraph clients["Clients"]
+        dashboard["Educator Dashboard<br/>Next.js · educator-dashboard/"]
+        telegram["Telegram Bot API"]
+    end
+
+    subgraph backend["Python backend · src/"]
+        api["api.py<br/>FastAPI REST"]
+        bot["bot.py<br/>long polling + scheduler thread"]
+        reflections["reflections.py<br/>classify · follow-up · digest"]
+        revision["revision.py<br/>revision pack · blind spots"]
+        agent["agent.py<br/>LangGraph practice workflow"]
+        skills["skills.py<br/>quiz · coding · diagram · evaluate"]
+        rag["course_rag.py<br/>chunking · embedding · retrieval"]
+        db["database.py<br/>storage + scheduling state"]
+    end
+
+    subgraph storage["Local storage"]
+        sqlite[("SQLite<br/>micro_adaptive.db")]
+        chroma[("Chroma<br/>chroma_db/")]
+        files[/"course_materials/"/]
+    end
+
+    openai["OpenAI API<br/>chat + embeddings"]
+
+    educator --> dashboard
+    student <--> telegram
+    dashboard -- "REST (HTTP/JSON)" --> api
+    telegram <-- "getUpdates / sendMessage" --> bot
+
+    api --> reflections
+    api --> rag
+    api --> db
+    api -- "save uploads" --> files
+
+    bot --> reflections
+    bot --> revision
+    bot --> agent
+    bot --> db
+
+    revision --> agent
+    revision --> db
+    reflections --> db
+    agent --> skills
+    agent --> rag
+
+    db --> sqlite
+    rag --> chroma
+    rag --> files
+
+    reflections & revision & agent & skills & rag --> openai
+```
+
+The dashboard and the bot never call each other directly: they are two
+processes that share the SQLite database. The educator's schedule and manual
+"send now" requests are written by `api.py`, and the scheduler thread in
+`bot.py` picks them up to broadcast the weekly prompt and the class digest.
+
 ## Project Structure
 
 ```text
