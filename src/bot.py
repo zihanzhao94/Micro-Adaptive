@@ -9,7 +9,7 @@ Flows:
   /learn    → Start an adaptive learning activity
   /progress → Mastery summary per concept
   /help     → Show commands
-  <text>    → AI concept explanation (mock)
+  <text>    → Course-grounded AI concept explanation
 """
 
 import json
@@ -26,6 +26,8 @@ from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 import database as db
 import agent
 import reflections
@@ -33,7 +35,6 @@ import revision
 from langgraph.types import Command
 
 # ── Config ────────────────────────────────────────────────────────────────────
-load_dotenv(Path(__file__).resolve().parent / ".env")
 db.init_db()
 TOKEN = os.getenv("BOT_TOKEN", "")
 if not TOKEN:
@@ -1124,7 +1125,7 @@ def maybe_run_weekly_digest():
 def maybe_run_weekly_push():
     """Start this week's reflection push once, if it's due.
 
-    Called on every polling tick (~30s). db.due_push() keeps a slot from being
+    Called on every scheduler check (~10s). db.due_push() keeps a slot from being
     sent twice; the send itself runs on a worker thread so a large class doesn't
     stall message handling for everyone else.
     """

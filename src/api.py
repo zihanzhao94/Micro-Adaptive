@@ -7,6 +7,8 @@ from pydantic import BaseModel
 import requests
 from dotenv import load_dotenv
 
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 try:
     from . import course_rag
     from . import database as db
@@ -18,7 +20,6 @@ except ImportError:
 
 
 app = FastAPI(title="Micro-Adaptive API")
-load_dotenv(Path(__file__).resolve().parent / ".env")
 db.init_db()
 
 app.add_middleware(
@@ -575,7 +576,7 @@ def schedule_status(course_id: str | None = Query(default=None)):
 
 @app.post("/schedule/send-now")
 def send_now(kind: str = Query(...), course_id: str | None = Query(default=None)):
-    """Queue a manual send. The bot picks it up on its next poll (~30s)."""
+    """Queue a manual send for the bot's next scheduler check (~10s)."""
     if kind not in {"push", "digest"}:
         raise HTTPException(status_code=400, detail="kind must be 'push' or 'digest'.")
 

@@ -1,354 +1,140 @@
 # Micro-Adaptive
 
-Micro-Adaptive is an agentic learning prototype for course-based adaptive tutoring.
-Educators upload course materials through a web dashboard, and students interact
-with an AI tutor through Telegram. The tutor uses RAG, student memory, mastery
-tracking, and LangGraph activity orchestration to generate adaptive quizzes,
-coding/design tasks, diagram prompts, and feedback.
+Micro-Adaptive is an AI-assisted weekly reflection prototype for university courses. Educators schedule a Telegram prompt asking students what they recall and what remains unclear. The system matches replies to weekly concepts and shows class and student signals in an educator dashboard. Students can also use optional course-grounded practice and revision.
+
+## Run locally
+
+Run these commands from the **project root**. The API, dashboard, and bot are separate processes; keep each in its own terminal.
+
+**Requirements:** Python 3.10+, Node.js 20.9+, an OpenAI API key, and a Telegram bot token for student onboarding and messages. The token is also needed by the dashboard invite page.
+
+1. Create `src/.env` (or edit your existing local copy):
+
+   ```env
+   OPENAI_API_KEY=your_openai_api_key
+   BOT_TOKEN=your_telegram_bot_token
+   # Optional: OPENAI_MODEL=gpt-4o-mini
+   ```
+
+   The API, bot, and standalone agent load this file. Keep it out of Git.
+
+2. Install Python dependencies and start the API (terminal 1):
+
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   python -m pip install -r src/requirements.txt
+   PYTHONPATH=src python -m uvicorn src.api:app --reload --host 127.0.0.1 --port 8000
+   ```
+
+   Check [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health); it should return `{"status":"ok"}`. API docs are at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+
+3. Start the educator dashboard (terminal 2):
+
+   ```bash
+   cd educator-dashboard
+   npm ci
+   npm run dev
+   ```
+
+   Open [http://localhost:3000](http://localhost:3000). The dashboard uses `http://127.0.0.1:8000` by default. If the API runs elsewhere, set `NEXT_PUBLIC_API_BASE` in `educator-dashboard/.env.local` before starting Next.js.
+
+4. Start the Telegram bot (terminal 3, from the project root):
+
+   ```bash
+   source .venv/bin/activate
+   PYTHONPATH=src python src/bot.py
+   ```
+
+   The bot uses Telegram long polling and runs its scheduler in the same process. Keep it running for onboarding, replies, scheduled prompts, and manual sends. Run only one bot instance for a token.
+
+5. In the dashboard, register or log in, then follow **Course → Schedule → Upload → Concepts → Teaching intention → Invite**. Set the course start date, teaching weeks, and push day/time, but leave pushes off during setup. Tag each upload with its teaching week. Review the course concepts and their week links. Then enable pushes from **Dashboard → Schedule** and share the invite link so students can open the bot and complete `/start`.
+
+   To try a prompt without waiting for the weekly time, use **Dashboard → Schedule → Send now**. The API queues the request in SQLite; the running bot picks it up on its next scheduler check. The current week needs uploaded material and linked concepts. A class digest is scheduled 24 hours after a push when there are replies; it can also be requested from the schedule page.
+
+On Windows, activate the virtual environment with `.venv\Scripts\activate` instead of `source .venv/bin/activate`.
 
 ## Architecture
 
+### Weekly reflection (main flow)
+
 ```mermaid
-flowchart TB
-    educator([Educator])
-    student([Student])
+sequenceDiagram
+    participant E as Educator dashboard
+    participant A as FastAPI
+    participant D as SQLite
+    participant B as Telegram bot
+    participant S as Student
 
-    subgraph clients["Clients"]
-        dashboard["Educator Dashboard<br/>Next.js · educator-dashboard/"]
-        telegram["Telegram Bot API"]
-    end
+    E->>A: Save schedule and weekly concepts
+    A->>D: Store course setup
+    B->>D: Check due schedule
+    D-->>B: Week and enrolled students
+    B->>S: Send reflection prompt via Telegram
+    S->>B: Send recall and confusion
+    Note over D,B: reflections.py classifies recall with OpenAI
+    B->>D: Save classified reflection
+    E->>A: Open weekly report
+    A->>D: Read reflections
+    Note over A,D: reflections.py prepares class and student analysis
+    A-->>E: Show insights
+```
 
-    subgraph backend["Python backend · src/"]
-        api["api.py<br/>FastAPI REST"]
-        bot["bot.py<br/>long polling + scheduler thread"]
-        reflections["reflections.py<br/>classify · follow-up · digest"]
-        revision["revision.py<br/>revision pack · blind spots"]
-        agent["agent.py<br/>LangGraph practice workflow"]
-        skills["skills.py<br/>quiz · coding · diagram · evaluate"]
-        rag["course_rag.py<br/>chunking · embedding · retrieval"]
-        db["database.py<br/>storage + scheduling state"]
-    end
+The API and bot run separately and communicate through the **same SQLite file**.
+The API also stores manual “send now” requests there; the bot's scheduler picks
+them up. Both classification and report analysis use `src/reflections.py`.
 
-    subgraph storage["Local storage"]
-        sqlite[("SQLite<br/>micro_adaptive.db")]
-        chroma[("Chroma<br/>chroma_db/")]
-        files[/"course_materials/"/]
-    end
+### Course materials and optional practice
 
-    openai["OpenAI API<br/>chat + embeddings"]
-
-    educator --> dashboard
-    student <--> telegram
-    dashboard -- "REST (HTTP/JSON)" --> api
-    telegram <-- "getUpdates / sendMessage" --> bot
-
-    api --> reflections
-    api --> rag
-    api --> db
-    api -- "save uploads" --> files
-
-    bot --> reflections
-    bot --> revision
-    bot --> agent
-    bot --> db
-
-    revision --> agent
-    revision --> db
-    reflections --> db
-    agent --> skills
+```mermaid
+flowchart LR
+    upload[Dashboard upload] --> api[FastAPI]
+    api --> files["Course files<br/>course_materials/"]
+    api --> rag["Indexing and retrieval<br/>course_rag.py"]
+    rag --> chroma[(Chroma)]
+    student["Student /learn"] --> bot[Telegram bot]
+    bot --> agent["Practice<br/>agent.py + skills.py"]
     agent --> rag
-
-    db --> sqlite
-    rag --> chroma
-    rag --> files
-
-    reflections & revision & agent & skills & rag --> openai
 ```
 
-The dashboard and the bot never call each other directly: they are two
-processes that share the SQLite database. The educator's schedule and manual
-"send now" requests are written by `api.py`, and the scheduler thread in
-`bot.py` picks them up to broadcast the weekly prompt and the class digest.
-
-## Project Structure
-
-```text
-.
-├── src/
-│   ├── agent.py              # LangGraph workflow and routing nodes
-│   ├── skills.py             # Reusable tutoring skill functions
-│   ├── bot.py                # Telegram student bot
-│   ├── api.py                # FastAPI backend for dashboard and uploads
-│   ├── course_rag.py         # Course material loading, chunking, Chroma retrieval
-│   ├── database.py           # SQLite storage for students, mastery, history, memory
-│   └── requirements.txt      # Python dependencies
-├── educator-dashboard/       # Next.js educator dashboard
-├── course_materials/         # Uploaded course files grouped by course_id
-├── chroma_db/                # Persisted Chroma vector store
-├── micro_adaptive.db         # Local SQLite database
-└── langgraph.json            # LangGraph dev configuration
-```
-
-## Requirements
-
-- Python 3.10+
-- Node.js 18+
-- OpenAI API key
-- Telegram bot token, only needed for the Telegram bot
-
-## Environment Setup
-
-Create `src/.env`:
-
-```env
-OPENAI_API_KEY=your_openai_api_key
-BOT_TOKEN=your_telegram_bot_token
-```
-
-`BOT_TOKEN` is only required when running `src/bot.py`.
-
-## Python Setup
-
-From the project root:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r src/requirements.txt
-```
-
-The project uses `langchain-chroma` as the only Chroma integration. If it is
-missing, activate the project environment and reinstall the requirements:
-
-```bash
-source .venv/bin/activate
-python -m pip install -r src/requirements.txt
-```
-
-## Start The FastAPI Backend
-
-Run from the project root:
-
-```bash
-source .venv/bin/activate
-PYTHONPATH=src uvicorn src.api:app --reload --host 127.0.0.1 --port 8000
-```
-
-Health check:
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
-Main API endpoints:
-
-```text
-GET  /health
-GET  /materials
-POST /materials/upload
-GET  /course/concepts
-POST /course/concepts/suggestions
-POST /course/concepts
-GET  /students
-GET  /dashboard/summary
-GET  /teaching-intention
-PUT  /teaching-intention
-```
-
-## Start The Educator Dashboard
-
-In a second terminal:
-
-```bash
-cd educator-dashboard
-npm install
-npm run dev
-```
-
-Open:
-
-```text
-http://localhost:3000
-```
-
-The dashboard calls the backend at:
-
-```text
-http://127.0.0.1:8000
-```
-
-To override it, create `educator-dashboard/.env.local`:
-
-```env
-NEXT_PUBLIC_API_BASE=http://127.0.0.1:8000
-```
-
-## Upload Course Materials
-
-Supported file types:
-
-```text
-.txt
-.pdf
-```
-
-Upload through the dashboard:
-
-```text
-http://localhost:3000/dashboard/materials
-```
-
-Or test with curl:
-
-```bash
-curl -F "file=@course_materials/sample_ml.txt" http://127.0.0.1:8000/materials/upload
-```
-
-Upload flow:
-
-```text
-file upload
-→ save into course_materials/<course_id>/
-→ split into chunks
-→ create embeddings
-→ add chunks to chroma_db/ with course_id metadata
-→ RAG retrieves only the active/student course material
-```
-
-## Confirm Course Concepts
-
-After uploading materials, open the setup flow at `/setup/concepts`. The
-`Generate suggestions` button asks the LLM for 5-12 high-level concepts from
-the uploaded material and learning objectives. Suggestions are not saved
-automatically: the educator can rename, remove, merge, or add concepts before
-selecting `Save concepts`.
-
-Only this confirmed list is stored as the course concept map. It is used to
-choose a new student's first learning activity and to identify concepts in the
-teaching-intention dashboard. Uploading another file does not overwrite it.
-
-## Start The Telegram Bot
-
-In another terminal:
-
-```bash
-source .venv/bin/activate
-PYTHONPATH=src python src/bot.py
-```
-
-In Telegram:
-
-```text
-/start
-/help
-/learn
-/progress
-/memory
-/history
-```
-
-Students can also ask natural-language questions such as:
-
-```text
-What can I do?
-How do I start?
-Explain this course topic.
-```
-
-## LangGraph Agent
-
-The current learning graph is:
-
-```text
-select_concept
-→ retrieve_course_context
-→ choose_activity
-→ generate_activity
-→ evaluate_response
-→ message_feedback / socratic_followup
-```
-
-`agent.py` handles graph orchestration. `skills.py` contains reusable skill
-functions:
-
-```text
-generate_quiz_skill
-generate_coding_task_skill
-generate_diagram_prompt_skill
-evaluate_open_activity_skill
-```
-
-To run the local debug script:
-
-```bash
-source .venv/bin/activate
-PYTHONPATH=src python src/agent.py
-```
-
-## Memory And Data
-
-The local SQLite database is:
-
-```text
-micro_adaptive.db
-```
-
-It stores:
-
-```text
-courses and active course
-course materials
-students
-mastery
-activity results
-recent conversation messages
-shared conversation summary
-```
-
-Free chat uses:
-
-```text
-conversation summary + recent messages + current question + RAG context
-```
-
-Activity selection uses:
-
-```text
-conversation summary + mastery + recent learning history + RAG context
-```
-
-Student registration is persisted in SQLite. The onboarding flow stores the
-student name, selected interests, learning style, registration status, join time,
-and the course_id active at registration time.
-
-## Common Issues
-
-`ModuleNotFoundError: No module named 'langchain_chroma'`
-
-```bash
-source .venv/bin/activate
-python -m pip install -r src/requirements.txt
-```
-
-`Failed to fetch` in the dashboard
-
-Make sure the FastAPI backend is running:
-
-```bash
-PYTHONPATH=src uvicorn src.api:app --reload --host 127.0.0.1 --port 8000
-```
-
-`BOT_TOKEN not set in .env`
-
-Add `BOT_TOKEN` to `src/.env`, or only run the FastAPI/dashboard parts.
-
-No RAG answer after upload
-
-Check that:
-
-```text
-1. The file type is .txt or .pdf
-2. OPENAI_API_KEY is set
-3. The upload endpoint returned status: uploaded
-4. chroma_db/ exists after upload
-```
+Uploads are `.pdf` or `.txt` files saved under `course_materials/<course_id>/`.
+`course_rag.py` embeds their chunks in `chroma_db/`; the optional LangGraph
+practice path retrieves them. `/revise` uses `revision.py` and student data in
+SQLite. These paths use OpenAI; the weekly reflection loop does not run through
+the LangGraph agent.
+
+## Main files
+
+| Path | Role |
+| --- | --- |
+| `src/api.py` | Dashboard API, course setup, materials, schedule, reports |
+| `src/bot.py` | Telegram onboarding, conversation, weekly push and digest |
+| `src/reflections.py` | Recall classification, follow-up, class analysis and digest text |
+| `src/database.py` | Shared SQLite data and scheduling state |
+| `src/course_rag.py` | PDF/text loading, chunking, embeddings and retrieval |
+| `src/agent.py`, `src/skills.py` | Optional LangGraph practice activities and feedback |
+| `src/revision.py` | Student `/revise` summary and blind spots |
+| `educator-dashboard/` | Next.js educator interface |
+| `evaluation/` | Evaluation scripts and fixtures |
+| `langgraph.json` | Optional LangGraph development configuration |
+
+`micro_adaptive.db`, `chroma_db/`, and uploaded course directories are local runtime data. A fresh checkout creates them as the application runs.
+
+## Student commands
+
+`/start` joins the course through the invite link. `/help`, `/learn`, `/progress`, `/memory`, `/history`, and `/revise` support the optional tutoring flow. Weekly reflection prompts arrive from the educator's schedule; students do not trigger them with a command.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Dashboard shows `Failed to fetch` | Confirm the API health URL above and that `NEXT_PUBLIC_API_BASE` points to it. |
+| `BOT_TOKEN not set in .env` | Add `BOT_TOKEN` to `src/.env`, then restart the bot. |
+| Invite link fails | The API also needs `BOT_TOKEN` and access to Telegram's `getMe` endpoint. |
+| No weekly prompt | Keep the bot running; enable pushes; set a valid course start date; upload material for the current week; link concepts to that week. Check **Dashboard → Schedule**. |
+| Upload or RAG fails | Check `OPENAI_API_KEY`, use a nonempty `.pdf` or `.txt`, and confirm the upload returned `status: uploaded`. |
+| `ModuleNotFoundError` | Activate `.venv` and reinstall `src/requirements.txt`. |
+
+## Prototype limits
+
+This is a local, single-active-course prototype. Scheduling uses the machine's local time, and the bot keeps the current conversation step in memory, so an in-progress exchange can be lost on restart. The API's educator login does not enforce session authorization on the other routes; do not expose this setup as a public service or use it for real student data without adding access control.

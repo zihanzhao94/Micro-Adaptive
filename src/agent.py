@@ -11,6 +11,11 @@ from typing import Literal
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt, Command
 import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 import course_rag
 import skills
 
